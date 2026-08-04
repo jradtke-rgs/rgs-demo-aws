@@ -34,11 +34,16 @@ after validating the manual flow against a real Rancher instance.
 ## Common Commands
 
 ```bash
-Scripts/rgsctl build      # deploy shared-services, rancher-manager, eks-cluster, observability, security in order
+Scripts/rgsctl checkdns   # preflight: verify AWS creds can see the Route53 zone in terraform.tfvars
+Scripts/rgsctl build      # deploy shared-services, rancher-manager, eks-cluster, observability, security in order (runs checkdns first)
 Scripts/rgsctl output     # show outputs from every module
 Scripts/rgsctl getkube    # grab rancher-manager's kubeconfig (only module with one until manual import happens)
 Scripts/rgsctl destroy    # tear down in reverse order, with confirmation prompt
 ```
+
+`checkdns` treats read access to the hosted zone as a proxy for write access
+(no IAM policy simulation, no create/delete probe record) - if the zone is
+visible under these credentials, we assume it's also writable.
 
 Or manually, per module: `tofu init && tofu plan -var-file=../terraform.tfvars && tofu apply -var-file=../terraform.tfvars`
 

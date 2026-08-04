@@ -52,7 +52,8 @@ no proven automation to build against yet.
 cp terraform.tfvars.example terraform.tfvars
 # edit terraform.tfvars with real values (AWS, Carbide, domain, SSH key)
 
-Scripts/rgsctl build      # deploy AWS-side infra for all modules, in order
+Scripts/rgsctl checkdns   # verify your AWS creds can see the Route53 zone in terraform.tfvars
+Scripts/rgsctl build      # deploy AWS-side infra for all modules, in order (runs checkdns first)
 Scripts/rgsctl output     # show URLs/IPs from every module
 Scripts/rgsctl getkube    # grab rancher-manager's kubeconfig
 Scripts/rgsctl destroy    # tear it all down (reverse order)

@@ -94,6 +94,90 @@ goto_repo_root() {
 }
 
 #######################################
+# Read a single value out of terraform.tfvars (repo root, cwd must already
+# be there - see goto_repo_root). Handles simple `key = "value"` and
+# `key = true` style lines; not a full HCL parser.
+# Arguments:
+#   $1 - variable name
+#######################################
+get_tfvar() {
+    local key="$1"
+    local line
+    line=$(grep -E "^[[:space:]]*${key}[[:space:]]*=" terraform.tfvars | head -n 1)
+    line="${line#*=}"
+    line="${line%%#*}"
+    line="$(echo "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    line="${line%\"}"
+    line="${line#\"}"
+    echo "$line"
+}
+
+#######################################
+# Preflight: verify the AWS credentials in use can read the public Route53
+# hosted zone configured in terraform.tfvars. Read access is treated as a
+# reasonable proxy for write access (the zone being visible at all under
+# these credentials implies permission to modify it) - this is a fast, safe
+# check, not a full IAM-policy simulation.
+#######################################
+check_route53_access() {
+    print_header "Checking Route53 Hosted Zone Access"
+
+    local create_record
+    create_record=$(get_tfvar create_route53_record)
+    if [ "$create_record" != "true" ]; then
+        print_msg "${YELLOW}" "create_route53_record is not true - skipping Route53 access check"
+        return 0
+    fi
+
+    if ! command -v aws &> /dev/null; then
+        print_msg "${RED}" "ERROR: AWS CLI not found - cannot verify Route53 access"
+        exit 1
+    fi
+
+    local root_domain subdomain zone_id fqdn
+    root_domain=$(get_tfvar root_domain)
+    subdomain=$(get_tfvar subdomain)
+    zone_id=$(get_tfvar route53_zone_id)
+    fqdn="${subdomain}.${root_domain}"
+
+    local private_zone result
+
+    if [ -n "$zone_id" ]; then
+        zone_id="${zone_id#/hostedzone/}"
+        print_msg "${BLUE}" "Checking configured zone ID: ${zone_id}"
+        if ! result=$(aws route53 get-hosted-zone --id "$zone_id" \
+            --query 'HostedZone.Config.PrivateZone' --output text 2>&1); then
+            print_msg "${RED}" "ERROR: Cannot access Route53 hosted zone ${zone_id}"
+            print_msg "${YELLOW}" "${result}"
+            print_msg "${YELLOW}" "Check that your AWS credentials have route53:GetHostedZone on this zone"
+            exit 1
+        fi
+        private_zone="$result"
+    else
+        print_msg "${BLUE}" "Looking up public hosted zone for: ${fqdn}"
+        if ! result=$(aws route53 list-hosted-zones-by-name --dns-name "${fqdn}" \
+            --query "HostedZones[?Name=='${fqdn}.'].Config.PrivateZone | [0]" --output text 2>&1); then
+            print_msg "${RED}" "ERROR: Failed to query Route53 (check AWS credentials/permissions)"
+            print_msg "${YELLOW}" "${result}"
+            exit 1
+        fi
+        if [ "$result" = "None" ] || [ -z "$result" ]; then
+            print_msg "${RED}" "ERROR: No hosted zone found for ${fqdn} in this AWS account"
+            print_msg "${YELLOW}" "Set route53_zone_id explicitly in terraform.tfvars, or create the zone first"
+            exit 1
+        fi
+        private_zone="$result"
+    fi
+
+    if [ "$private_zone" = "True" ]; then
+        print_msg "${RED}" "ERROR: Hosted zone for ${fqdn} is a PRIVATE zone - a public zone is required"
+        exit 1
+    fi
+
+    print_msg "${GREEN}" "Route53 public hosted zone for ${fqdn} is accessible"
+}
+
+#######################################
 # Build: Deploy all infrastructure
 #######################################
 build() {
@@ -101,6 +185,7 @@ build() {
 
     check_tofu
     goto_repo_root
+    check_route53_access
 
     print_header "Deploying Infrastructure Modules"
 
@@ -293,6 +378,10 @@ OPTIONS:
     getkube     Retrieve kubeconfig from the rancher-manager node
                 (observability/security require manual Rancher import first)
 
+    checkdns    Verify your AWS credentials can access the Route53 public
+                hosted zone configured in terraform.tfvars (runs
+                automatically as part of build)
+
     help        Display this help message
 
 DEPLOYMENT ORDER:
@@ -339,6 +428,10 @@ main() {
             ;;
         getkube)
             getkube
+            ;;
+        checkdns)
+            goto_repo_root
+            check_route53_access
             ;;
         help|--help|-h)
             show_help
