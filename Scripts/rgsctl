@@ -1,0 +1,361 @@
+#!/bin/bash
+#
+# Quick Start Script for RGS Demo AWS Infrastructure
+#
+# Automates deployment/teardown of the RGS demo environment in AWS using
+# OpenTofu modules. Adapted from suse-demo-aws's democtl.
+#
+
+# Color codes for output
+readonly RED='\033[0;31m'
+readonly GREEN='\033[0;32m'
+readonly YELLOW='\033[1;33m'
+readonly BLUE='\033[0;34m'
+readonly NC='\033[0m' # No Color
+
+# Project deployment order (CRITICAL: shared-services must be first)
+# eks-cluster/observability/security only provision AWS-side prerequisites in
+# v1 - the actual Rancher-side wiring (EKS driver, custom cluster import,
+# product Helm installs) is a manual step. See each module's README.md.
+readonly PROJECTS=(shared-services rancher-manager eks-cluster observability security)
+
+# Modules with a running Kubernetes cluster reachable via the ssh_command
+# output. observability/security are intentionally excluded until they've
+# been manually imported into Rancher (see their READMEs) - there's no
+# kubeconfig on the node until that import step installs RKE2.
+readonly K8S_PROJECTS=(rancher-manager)
+
+#######################################
+# Print colored message
+# Arguments:
+#   $1 - Color code
+#   $2 - Message
+#######################################
+print_msg() {
+    echo -e "${1}${2}${NC}"
+}
+
+#######################################
+# Print section header
+# Arguments:
+#   $1 - Header text
+#######################################
+print_header() {
+    echo
+    print_msg "${BLUE}" "========================================"
+    print_msg "${BLUE}" "$1"
+    print_msg "${BLUE}" "========================================"
+}
+
+#######################################
+# Check if OpenTofu is installed and working
+#######################################
+check_tofu() {
+    if ! command -v tofu &> /dev/null; then
+        print_msg "${RED}" "ERROR: OpenTofu is not installed or not in PATH"
+        echo
+        print_msg "${YELLOW}" "OpenTofu is required to run this script."
+        echo
+        print_msg "${BLUE}" "Installation instructions for macOS:"
+        echo "  brew install opentofu"
+        echo
+        print_msg "${BLUE}" "For other platforms, visit: https://opentofu.org/docs/intro/install/"
+        echo
+        exit 1
+    fi
+
+    if ! tofu version &> /dev/null; then
+        print_msg "${RED}" "ERROR: OpenTofu is installed but not working correctly"
+        exit 1
+    fi
+
+    local tofu_version
+    tofu_version=$(tofu version | head -n 1)
+    print_msg "${GREEN}" "OpenTofu found: ${tofu_version}"
+}
+
+#######################################
+# Verify we're at the repo root (parent of Scripts/)
+#######################################
+goto_repo_root() {
+    cd "$(dirname "$0")/.." || exit 1
+
+    if [ ! -d "shared-services" ]; then
+        print_msg "${RED}" "ERROR: Cannot find project directories"
+        print_msg "${YELLOW}" "Current directory: $(pwd)"
+        exit 1
+    fi
+
+    if [ ! -f "terraform.tfvars" ]; then
+        print_msg "${RED}" "ERROR: terraform.tfvars not found in repo root"
+        print_msg "${YELLOW}" "Copy terraform.tfvars.example to terraform.tfvars and fill in real values first"
+        exit 1
+    fi
+}
+
+#######################################
+# Build: Deploy all infrastructure
+#######################################
+build() {
+    print_header "Building RGS Demo AWS Deployment"
+
+    check_tofu
+    goto_repo_root
+
+    print_header "Deploying Infrastructure Modules"
+
+    for PROJECT in "${PROJECTS[@]}"; do
+        print_msg "${GREEN}" "Deploying: ${PROJECT}"
+
+        cd "${PROJECT}" || exit 1
+
+        tofu init || { print_msg "${RED}" "Failed to initialize ${PROJECT}"; exit 1; }
+        tofu plan -var-file=../terraform.tfvars || { print_msg "${RED}" "Failed to plan ${PROJECT}"; exit 1; }
+        echo "yes" | tofu apply -var-file=../terraform.tfvars || { print_msg "${RED}" "Failed to apply ${PROJECT}"; exit 1; }
+
+        cd - > /dev/null || exit 1
+        print_msg "${GREEN}" "Successfully deployed: ${PROJECT}"
+    done
+
+    print_header "Deployment Outputs"
+    for PROJECT in "${PROJECTS[@]}"; do
+        echo
+        print_msg "${BLUE}" "Output from: ${PROJECT}"
+        print_msg "${BLUE}" "----------------------------------------"
+        cd "${PROJECT}" || exit 1
+        tofu output
+        cd - > /dev/null || exit 1
+    done
+
+    print_header "Deployment Complete!"
+    print_msg "${GREEN}" "AWS-side infrastructure has been deployed."
+    print_msg "${YELLOW}" "Remaining manual steps (see eks-cluster/, observability/, security/ READMEs):"
+    echo "  - Create the EKS downstream cluster via the Rancher EKS driver"
+    echo "  - Import the observability node as a custom cluster, then Helm-install RGS Observability"
+    echo "  - Import the user-apps node as a custom cluster, then Helm-install RGS Security"
+}
+
+#######################################
+# Destroy: Destroy all infrastructure
+# CRITICAL: Destroys in REVERSE order to respect dependencies
+#######################################
+destroy() {
+    print_header "Destroying RGS Demo AWS Infrastructure"
+
+    check_tofu
+    goto_repo_root
+
+    print_msg "${RED}" "WARNING: This will destroy ALL infrastructure!"
+    read -r -p "Are you sure you want to continue? (yes/no): " confirm
+    if [ "${confirm}" != "yes" ]; then
+        print_msg "${YELLOW}" "Destruction cancelled"
+        exit 0
+    fi
+
+    for (( idx=${#PROJECTS[@]}-1 ; idx>=0 ; idx-- )); do
+        PROJECT="${PROJECTS[idx]}"
+        print_msg "${YELLOW}" "Destroying: ${PROJECT}"
+
+        cd "${PROJECT}" || exit 1
+
+        echo "yes" | tofu destroy -var-file=../terraform.tfvars || {
+            print_msg "${RED}" "Failed to destroy ${PROJECT}"
+            print_msg "${YELLOW}" "You may need to manually destroy remaining resources"
+            exit 1
+        }
+
+        cd - > /dev/null || exit 1
+        print_msg "${GREEN}" "Successfully destroyed: ${PROJECT}"
+    done
+
+    print_header "Destruction Complete!"
+    print_msg "${GREEN}" "All infrastructure has been destroyed."
+    print_msg "${YELLOW}" "Note: EKS/custom clusters created manually via the Rancher UI are not tracked"
+    print_msg "${YELLOW}" "here - delete those from Rancher/AWS EKS console before or after this step."
+}
+
+#######################################
+# Output: Display OpenTofu outputs from all projects
+#######################################
+show_output() {
+    print_header "OpenTofu Outputs from All Projects"
+
+    check_tofu
+    goto_repo_root
+
+    for PROJECT in "${PROJECTS[@]}"; do
+        echo
+        print_msg "${BLUE}" "Output from: ${PROJECT}"
+        print_msg "${BLUE}" "----------------------------------------"
+
+        if [ ! -d "${PROJECT}" ]; then
+            print_msg "${YELLOW}" "WARNING: Project directory ${PROJECT} not found"
+            continue
+        fi
+
+        cd "${PROJECT}" || exit 1
+        tofu init -backend=true > /dev/null 2>&1 || print_msg "${YELLOW}" "WARNING: Failed to initialize ${PROJECT}"
+        tofu output
+        cd - > /dev/null || exit 1
+    done
+
+    print_header "Output Display Complete!"
+}
+
+#######################################
+# Get kubeconfig: retrieve kubeconfig from the rancher-manager node
+#######################################
+getkube() {
+    print_header "Retrieving Kubeconfig Files"
+
+    check_tofu
+    goto_repo_root
+
+    mkdir -p .kube
+
+    for PROJECT in "${K8S_PROJECTS[@]}"; do
+        echo
+        print_msg "${BLUE}" "Retrieving kubeconfig from: ${PROJECT}"
+        print_msg "${BLUE}" "----------------------------------------"
+
+        if [ ! -d "${PROJECT}" ]; then
+            print_msg "${YELLOW}" "WARNING: Project directory ${PROJECT} not found"
+            continue
+        fi
+
+        cd "${PROJECT}" || exit 1
+
+        local ssh_cmd
+        ssh_cmd=$(tofu output -raw ssh_command 2>/dev/null)
+
+        if [ -z "$ssh_cmd" ] || [ "$ssh_cmd" = "Use AWS Systems Manager Session Manager to connect" ]; then
+            print_msg "${YELLOW}" "WARNING: No SSH access configured for ${PROJECT}"
+            cd - > /dev/null || exit 1
+            continue
+        fi
+
+        local ssh_key
+        local ssh_host
+        ssh_key=$(echo "$ssh_cmd" | grep -o '\-i [^ ]*' | cut -d' ' -f2)
+        ssh_host=$(echo "$ssh_cmd" | grep -o 'ec2-user@[^ ]*' | cut -d'@' -f2)
+        ssh_key="${ssh_key/#\~/$HOME}"
+
+        local output_file="../.kube/${PROJECT}.kubeconfig"
+        print_msg "${BLUE}" "Copying kubeconfig to: .kube/${PROJECT}.kubeconfig"
+
+        # RKE2's kubeconfig lives at /etc/rancher/rke2/rke2.yaml (also copied
+        # to ~ec2-user/.kube/config by user-data.sh)
+        if scp -i "$ssh_key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            "ec2-user@${ssh_host}:/home/ec2-user/.kube/config" "$output_file" 2>/dev/null; then
+            print_msg "${GREEN}" "Retrieved kubeconfig for ${PROJECT}"
+
+            local hostname
+            hostname=$(tofu output -raw rancher_hostname 2>/dev/null)
+            local server_address="${ssh_host}"
+            [ -n "$hostname" ] && [ "$hostname" != "null" ] && server_address="$hostname"
+
+            local temp_file="${output_file}.tmp"
+            sed "s|127\.0\.0\.1:6443|${server_address}:6443|g; s|localhost:6443|${server_address}:6443|g" "$output_file" > "$temp_file" \
+                && mv "$temp_file" "$output_file"
+            print_msg "${GREEN}" "Updated server address to: ${server_address}:6443"
+        else
+            print_msg "${RED}" "Failed to retrieve kubeconfig for ${PROJECT}"
+        fi
+
+        cd - > /dev/null || exit 1
+    done
+
+    print_header "Kubeconfig Retrieval Complete!"
+    print_msg "${YELLOW}" "For observability/security clusters, grab kubeconfig from the Rancher UI"
+    print_msg "${YELLOW}" "after completing their manual custom-cluster import (see each module's README)."
+}
+
+#######################################
+# Display help information
+#######################################
+show_help() {
+    cat << EOF
+
+RGS Demo AWS - Quick Start Script
+
+USAGE:
+    $(basename "$0") [OPTION]
+
+OPTIONS:
+    build       Deploy AWS-side infrastructure for all modules in order:
+                shared-services, rancher-manager, eks-cluster, observability, security
+
+    destroy     Destroy all AWS-side infrastructure in reverse order
+                Prompts for confirmation before proceeding
+
+    output      Display OpenTofu outputs from all deployed modules
+
+    getkube     Retrieve kubeconfig from the rancher-manager node
+                (observability/security require manual Rancher import first)
+
+    help        Display this help message
+
+DEPLOYMENT ORDER:
+    1. shared-services  (VPC, networking, security groups)
+    2. rancher-manager  (single-node RKE2 + Rancher Manager)
+    3. eks-cluster      (IAM plumbing for the Rancher EKS driver)
+    4. observability    (bare node for its own downstream RKE2 cluster)
+    5. security         (bare node for the user-apps downstream RKE2 cluster)
+
+MANUAL STEPS (not automated in v1 - see each module's README.md):
+    - Creating the EKS downstream cluster via the Rancher EKS driver
+    - Importing observability/security nodes as custom clusters in Rancher
+    - Helm-installing RGS Observability / RGS Security once clusters are Active
+
+PREREQUISITES:
+    - AWS CLI configured with valid credentials
+    - OpenTofu >= 1.5.0 installed
+    - terraform.tfvars in the repo root (copy from terraform.tfvars.example)
+
+EXAMPLES:
+    $(basename "$0") build
+    $(basename "$0") output
+    $(basename "$0") getkube
+    $(basename "$0") destroy
+
+For more information, see: https://github.com/jradtke-rgs/rgs-demo-aws
+
+EOF
+}
+
+#######################################
+# Main execution
+#######################################
+main() {
+    case "${1:-}" in
+        build)
+            build
+            ;;
+        destroy)
+            destroy
+            ;;
+        output)
+            show_output
+            ;;
+        getkube)
+            getkube
+            ;;
+        help|--help|-h)
+            show_help
+            ;;
+        "")
+            print_msg "${RED}" "ERROR: No option specified"
+            echo
+            show_help
+            exit 1
+            ;;
+        *)
+            print_msg "${RED}" "ERROR: Invalid option: $1"
+            echo
+            show_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

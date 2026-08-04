@@ -1,0 +1,87 @@
+# Project Specifications
+
+## Goal
+
+Give potential RGS customers a simple way to see the product functionality in action, while also giving them a working understanding of how to implement RGS solutions themselves.
+
+## Requirements / Constraints
+
+* rely on bash 
+* run on macOS or Linux
+* use openTofu, if needed
+* smallest or most cost-efficient AWS EC2 instances possible
+* single AZ to safe money (since this is a Demo)
+* use Rancher Government Solutions software and Carbide Portal
+* breakdown software by concern or product and allow for choice which software is deployed (see table below)
+* Parameterize wherever possible (i.e. variable for domain to utilize, hostname for each service/component, Let's Encrypt parameters, AWS instance size)
+
+## User-based Requirements
+
+* AWS auth creds and permissions
+* route53 Public Hosted Zone
+* Let's Encrypt Account
+* Github repo (this repo)
+
+## Software Overview
+
+| Mandatory | Software |
+|:---------:|:---------|
+| Y | Rancher Manager |
+| N | RGS Security |
+| N | RGS Observability |
+
+## Deliverable / Outcomes
+Deploy:
+- single-node Rancher Manager 
+  - SL-Micro AMI
+  - RKE2 (using Carbide Portal Credentials) 
+  - Rancher Manager
+- Downstream EKS cluster
+  - Deploy from Rancher Manager, using the RGS EKS provisioning driver
+
+## Credentials
+
+Credentials are kept out of the repo and read from per-concern config files under `~/.config/`, one directory per concern, e.g.:
+- `~/.config/RGS/creds` — Carbide Portal credentials, Observability license key
+- `~/.config/AWS/creds` — AWS auth credentials
+
+## Notes
+domain I will use: rgs-demo-aws.kubernerdes.com
+use the same AZ if/when possible (no point in spending money on traffic across AZ for a demo)
+optional software (RGS Security, RGS Observability) is expected to be delivered as Helm charts; handle exceptions on a case-by-case basis if a component isn't chart-based
+
+
+This repo will resemble https://github.com/cloudxabide/suse-demo-aws
+
+## Architecture Decisions (finalized after reviewing suse-demo-aws)
+
+* **Credentials**: dropped the earlier `~/.config` idea - AWS creds come from
+  the normal AWS CLI credential chain, and Carbide Portal/Observability
+  license values live in a gitignored root `terraform.tfvars`, exactly like
+  `suse-demo-aws`.
+* **Registry access**: no Hauler/Harbor for v1. Researched both - the Carbide
+  Secured Registry (`rgcrprod.azurecr.us`) explicitly documents Hauler as
+  "recommended" (not required) tooling built for airgapped asset transfer.
+  Since this demo is fully internet-connected, nodes authenticate to Carbide
+  directly via RKE2's `registries.yaml`. Harbor (mirroring your own registry)
+  is a possible future add-on, not v1.
+* **Downstream clusters**: three, all new territory vs. the reference repo:
+  - EKS cluster, provisioned from Rancher via the RGS EKS driver.
+  - RGS Observability gets its **own** downstream RKE2 cluster.
+  - RGS Security is demoed on a separate downstream RKE2 cluster at
+    `user-apps.rgs-demo-aws.kubernerdes.com`.
+  For v1, the AWS-side infrastructure (nodes/IAM/networking) for all three is
+  scaffolded in OpenTofu, but the Rancher-side wiring (EKS driver setup,
+  custom cluster import, product Helm installs) is a documented manual step -
+  converting to full `rancher2`-provider automation is deferred until that
+  flow is validated against a real Rancher instance.
+* **AMI**: SL-Micro naming confirmed via a live `aws ec2 describe-images`
+  call (2026-08-04): `suse-sle-micro-6-*-byos-v*-hvm-ssd-x86_64`, owner
+  account `013907871322`.
+* Repo scaffolding lives in `shared-services/`, `rancher-manager/`,
+  `eks-cluster/`, `observability/`, `security/`, plus `Scripts/rgsctl`
+  (adapted from `suse-demo-aws`'s `democtl`). See `CLAUDE.md` for the full
+  breakdown and the list of still-unverified assumptions (Rancher's actual
+  EKS Cloud Credential mechanism, whether the public `rancher-stable` chart
+  vs. a Carbide-hosted chart should be used, SL-Micro's transactional-update
+  behavior under `user-data.sh`).
