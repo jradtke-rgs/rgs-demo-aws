@@ -72,8 +72,13 @@ create_route53_record = true
 root_domain            = "kubernerdes.com"
 subdomain              = "rgs-demo-aws"
 route53_zone_id        = ""  # Leave empty to auto-discover
-# To find your Route53 zone ID:
-# aws route53 list-hosted-zones-by-name --dns-name rgs-demo-aws.kubernerdes.com --query "HostedZones[].Id" --output text
+# To find your Route53 zone ID (filtered to the exact zone - the unfiltered
+# `HostedZones[].Id` form returns every zone your IAM principal can see, not
+# just this one):
+# aws route53 list-hosted-zones-by-name \
+#   --dns-name rgs-demo-aws.kubernerdes.com \
+#   --query "HostedZones[?Name=='rgs-demo-aws.kubernerdes.com.'].Id | [0]" \
+#   --output text
 
 # DNS Hostnames (per product)
 hostname_rancher       = "rancher"
