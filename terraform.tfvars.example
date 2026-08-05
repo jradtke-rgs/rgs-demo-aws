@@ -106,18 +106,20 @@ rgs_carbide_password = "YOUR-CARBIDE-PORTAL-PASSWORD-OR-TOKEN"
 # Rancher Manager Configuration
 # -----------------------------------------------------------------------------
 rancher_version      = "2.14.3"
-cert_manager_version = "1.15.3"
+cert_manager_version = "1.21.1"
 
 # RKE2 version (applies to all modules: rancher-manager, observability, security)
 # Leave commented to use latest stable RKE2 release
 # rke2_version = "v1.30.0+rke2r1"
 # To find available RKE2 versions: https://github.com/rancher/rke2/releases
 #
-# NOTE: rancher_version and rke2_version/latest-stable-RKE2 are coupled - the
-# Rancher Helm chart pins a kubeVersion ceiling (rancher-2.14.3 requires
-# kubeVersion < 1.36.0-0). If a future "latest stable" RKE2 release crosses
-# that ceiling, bump rancher_version to a chart release whose kubeVersion
-# covers it - check https://releases.rancher.com/server-charts/stable/index.yaml
+# NOTE: rancher_version, cert_manager_version, and rke2_version/latest-stable-
+# RKE2 are all coupled - both the Rancher Helm chart and cert-manager pin a
+# supported Kubernetes version window (rancher-2.14.3 requires kubeVersion <
+# 1.36.0-0; cert-manager 1.21.x supports 1.33-1.36). If a future "latest
+# stable" RKE2 release crosses either ceiling, bump both versions together -
+# check https://releases.rancher.com/server-charts/stable/index.yaml
+# (kubeVersion field) and https://cert-manager.io/docs/releases/
 
 # Leave empty to install the public rancher-stable Helm chart (images sourced via
 # registries.yaml). Set once a Carbide-hosted Rancher OCI chart reference is confirmed.

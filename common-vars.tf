@@ -210,10 +210,14 @@ variable "rancher_version" {
   default     = "2.14.3"
 }
 
+# NOTE: also coupled to the RKE2/Kubernetes version - cert-manager only
+# supports a rolling window of Kubernetes releases (e.g. 1.21.x supports
+# 1.33-1.36). Check https://cert-manager.io/docs/releases/ before changing
+# either default.
 variable "cert_manager_version" {
   description = "Cert-manager version to install"
   type        = string
-  default     = "1.15.3"
+  default     = "1.21.1"
 }
 
 variable "rke2_version" {
