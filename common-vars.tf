@@ -198,10 +198,16 @@ variable "rgs_carbide_password" {
 }
 
 # Product-Specific Versions
+# NOTE: rancher_version and rke2_version are coupled - each Rancher chart
+# release pins a kubeVersion ceiling (e.g. rancher-2.14.3's chart requires
+# kubeVersion < 1.36.0-0). If you bump rke2_version past that ceiling,
+# `helm install rancher` fails with "chart requires kubeVersion: ...". Check
+# https://releases.rancher.com/server-charts/stable/index.yaml (kubeVersion
+# field) before changing either default.
 variable "rancher_version" {
   description = "Rancher version to install"
   type        = string
-  default     = "2.9.2"
+  default     = "2.14.3"
 }
 
 variable "cert_manager_version" {
