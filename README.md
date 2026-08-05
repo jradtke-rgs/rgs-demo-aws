@@ -54,8 +54,10 @@ mkdir -p ~/Developer/Projects; cd $_
 [ -d "rgs-demo-aws" ] && { i=1; while [ -d "rgs-demo-aws-$(date +%F)-$(printf '%02d' $i)" ]; do ((i++)); done; mv rgs-demo-aws "rgs-demo-aws-$(date +%F)-$(printf '%02d' $i)"; }
 git clone https://github.com/jradtke-rgs/rgs-demo-aws.git; cd rgs-demo-aws
 
-cp terraform.tfvars.example terraform.tfvars
-# Edit terraform.tfvars with real values (AWS, Carbide Portal, domain, SSH key)
+# Copy in a pre-populated ("hydrated") tfvars kept one level up, outside the
+# repo, with real values already filled in. If you don't have one yet, start
+# from the repo's own terraform.tfvars.example instead.
+cp ../terraform.tfvars.example-rgs-demo-aws terraform.tfvars
 cat terraform.tfvars
 
 Scripts/rgsctl build
