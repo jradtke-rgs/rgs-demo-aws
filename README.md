@@ -49,15 +49,51 @@ no proven automation to build against yet.
 ## Quick Start
 
 ```bash
-cp terraform.tfvars.example terraform.tfvars
-# edit terraform.tfvars with real values (AWS, Carbide, domain, SSH key)
+mkdir -p ~/Developer/Projects; cd $_
+# Archive an existing checkout instead of clobbering it
+[ -d "rgs-demo-aws" ] && { i=1; while [ -d "rgs-demo-aws-$(date +%F)-$(printf '%02d' $i)" ]; do ((i++)); done; mv rgs-demo-aws "rgs-demo-aws-$(date +%F)-$(printf '%02d' $i)"; }
+git clone https://github.com/jradtke-rgs/rgs-demo-aws.git; cd rgs-demo-aws
 
-Scripts/rgsctl checkdns   # verify your AWS creds can see the Route53 zone in terraform.tfvars
-Scripts/rgsctl build      # deploy AWS-side infra for all modules, in order (runs checkdns first)
-Scripts/rgsctl output     # show URLs/IPs from every module
-Scripts/rgsctl getkube    # grab rancher-manager's kubeconfig
-Scripts/rgsctl destroy    # tear it all down (reverse order)
+cp terraform.tfvars.example terraform.tfvars
+# Edit terraform.tfvars with real values (AWS, Carbide Portal, domain, SSH key)
+cat terraform.tfvars
+
+Scripts/rgsctl build
+
+# Countdown while Rancher finishes bootstrapping (RKE2 + Helm installs take a while)
+countdown_seconds=600
+while [ "$countdown_seconds" -ge 0 ]; do
+    printf "\rTime remaining: %3d seconds \033[0K" "$countdown_seconds"
+    countdown_seconds=$((countdown_seconds - 1))
+    sleep 1
+done
 ```
+
+And.. the fun:
+
+```
+EXAMPLES:
+    # Deploy AWS-side infrastructure for all modules, in order
+    Scripts/rgsctl build
+
+    # Verify AWS creds can see the Route53 zone in terraform.tfvars
+    Scripts/rgsctl checkdns
+
+    # Display OpenTofu outputs (URLs/IPs) from every module
+    Scripts/rgsctl output
+
+    # Retrieve rancher-manager's kubeconfig
+    Scripts/rgsctl getkube
+
+    # Destroy all infrastructure (reverse order, with confirmation prompt)
+    Scripts/rgsctl destroy
+
+    # Show help
+    Scripts/rgsctl help
+```
+
+`rgsctl build` only stands up the AWS-side infrastructure - see **Manual
+Steps** below for what's left once it finishes.
 
 ## Manual Steps
 
