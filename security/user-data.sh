@@ -1,6 +1,13 @@
 #!/bin/bash
 set -e
 
+# cloud-init runs with $HOME unset, which makes XDG-aware tools (Helm, etc.)
+# resolve config dirs as relative paths against cwd "/" - a read-only btrfs
+# snapshot on SL-Micro. Set HOME/cwd to the writable /root subvolume before
+# anything that might need it (e.g. once product Helm installs land here).
+export HOME=/root
+cd /root
+
 exec > >(tee /var/log/user-data.log)
 exec 2>&1
 

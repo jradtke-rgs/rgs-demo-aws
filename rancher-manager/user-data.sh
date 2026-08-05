@@ -1,6 +1,16 @@
 #!/bin/bash
 set -e
 
+# cloud-init runs this script with $HOME unset. Helm (and other XDG-aware
+# tools) then resolve their config/cache dirs as *relative* paths (e.g.
+# ".config/helm") instead of "$HOME/.config/helm". On SL-Micro the cwd during
+# cloud-init is "/", which is a read-only btrfs snapshot - so those relative
+# mkdirs fail with "read-only file system" before Helm ever runs. Confirmed
+# on a real instance 2026-08-05. Setting HOME explicitly fixes this; /root is
+# its own writable btrfs subvolume on SL-Micro (unlike bare "/").
+export HOME=/root
+cd /root
+
 # Log all output
 exec > >(tee /var/log/user-data.log)
 exec 2>&1
