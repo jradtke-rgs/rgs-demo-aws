@@ -41,9 +41,11 @@ Deploy:
 
 ## Credentials
 
-Credentials are kept out of the repo and read from per-concern config files under `~/.config/`, one directory per concern, e.g.:
-- `~/.config/RGS/creds` — Carbide Portal credentials, Observability license key
-- `~/.config/AWS/creds` — AWS auth credentials
+Superseded below (see Architecture Decisions) - the `~/.config` idea was
+dropped in favor of a gitignored root `terraform.tfvars`, matching
+`suse-demo-aws`. AWS creds come from the normal AWS CLI credential chain;
+Carbide Portal credentials and the Observability license key live in
+`terraform.tfvars`.
 
 ## Notes
 domain I will use: rgs-demo-aws.kubernerdes.com
@@ -83,5 +85,28 @@ This repo will resemble https://github.com/cloudxabide/suse-demo-aws
   (adapted from `suse-demo-aws`'s `democtl`). See `CLAUDE.md` for the full
   breakdown and the list of still-unverified assumptions (Rancher's actual
   EKS Cloud Credential mechanism, whether the public `rancher-stable` chart
-  vs. a Carbide-hosted chart should be used, SL-Micro's transactional-update
-  behavior under `user-data.sh`).
+  vs. a Carbide-hosted chart should be used).
+
+## Findings From the First Real Deployment (2026-08-05)
+
+* **SL-Micro's `/` is read-only** (separate writable btrfs subvolumes for
+  `/root`, `/var`, `/usr/local`) - cloud-init runs `user-data.sh` with `$HOME`
+  unset, so Helm resolved config dirs as relative paths against cwd `/` and
+  hit `mkdir .config: read-only file system`. Fixed with `export HOME=/root`
+  in all three `user-data.sh` scripts.
+* **`rancher_version`/`cert_manager_version` version-skew**: both defaults
+  were ~2 years stale and incompatible with `rke2_version`'s "latest stable"
+  default (chart `kubeVersion` ceilings exceeded). Bumped to current,
+  RKE2-1.35.x-compatible releases.
+* **Downstream cluster registration is now automated**
+  (`rgsctl register <module> <cluster-name>`) via Rancher's REST API + SSH -
+  no `rancher2` Terraform provider needed after all, and no manual UI
+  clicking. Required bypassing strict CA verification in two separate places
+  (the node install script and the in-cluster `cattle-cluster-agent`) even
+  though this demo uses a real, publicly-trusted Let's Encrypt cert - see
+  `CLAUDE.md` for the exact mechanism. Still manual: the EKS driver setup and
+  the actual RGS product Helm install (chart source still unconfirmed).
+* Let's Encrypt **production** has a real rate limit (5 duplicate certs per
+  exact hostname per rolling 7 days) that repeated `rancher-manager` rebuilds
+  can hit quickly during iteration - switch `letsencrypt_environment` to
+  `staging` while actively rebuilding.

@@ -25,11 +25,12 @@ All product modules depend on `shared-services/terraform.tfstate` via
 are deployed.
 
 **v1 scope boundary**: `eks-cluster`, `observability`, and `security` only
-provision AWS-side infrastructure. The Rancher-side wiring (EKS driver setup,
-custom cluster import, product Helm installs) is a documented manual step per
-module's README.md - this was a deliberate choice to avoid guessing at
-untested `rancher2`-provider resource shapes. Convert to full automation only
-after validating the manual flow against a real Rancher instance.
+provision AWS-side infrastructure via OpenTofu. Downstream custom-cluster
+*registration* for observability/security is now automated (`rgsctl register
+<module> <cluster-name>` - REST API + SSH, no Terraform `rancher2` provider
+involved, confirmed live 2026-08-05). Still manual: the EKS driver setup
+(`eks-cluster/README.md`) and the actual RGS product Helm installs, since the
+real Carbide Portal chart source isn't confirmed yet.
 
 ## Common Commands
 
@@ -38,12 +39,30 @@ Scripts/rgsctl checkdns   # preflight: verify AWS creds can see the Route53 zone
 Scripts/rgsctl build      # deploy shared-services, rancher-manager, eks-cluster, observability, security in order (runs checkdns first)
 Scripts/rgsctl output     # show outputs from every module
 Scripts/rgsctl getkube    # grab rancher-manager's kubeconfig (only module with one until manual import happens)
+Scripts/rgsctl register observability observability   # register the bare node as a downstream cluster
+Scripts/rgsctl register security user-apps             # same, for the Security demo cluster
+Scripts/rgsctl orphans [--delete]   # find/remove AWS resources not tracked in any module's tofu state
 Scripts/rgsctl destroy    # tear down in reverse order, with confirmation prompt
 ```
 
 `checkdns` treats read access to the hosted zone as a proxy for write access
 (no IAM policy simulation, no create/delete probe record) - if the zone is
 visible under these credentials, we assume it's also writable.
+
+`orphans` compares AWS resources tagged/named `${environment}-*` against
+resource IDs pulled live from `tofu show -json` - **not a hardcoded list**.
+Critically, it scans every sibling `${repo_dir}*` directory too (e.g.
+`rgs-demo-aws-2026-08-05-04`), not just the current checkout: this repo's
+own Quick Start archives an existing checkout (`mv` to a dated dir) before
+cloning fresh rather than destroying it first, so a brand-new clone's local
+state is legitimately empty while previously-deployed resources are still
+live and tracked in that archived sibling. Confirmed live 2026-08-05: without
+the sibling scan, `orphans` misreported an entire live deployment (5 EC2
+instances, EIPs, security groups, IAM roles) as orphaned because its real
+state was sitting in `rgs-demo-aws-2026-08-05-04`, not the fresh checkout.
+**Caveat**: if an old archived checkout is deleted without running `rgsctl
+destroy` in it first, its resources become genuinely untracked orphans that
+no tool can distinguish from currently-live ones by state alone.
 
 Or manually, per module: `tofu init && tofu plan -var-file=../terraform.tfvars && tofu apply -var-file=../terraform.tfvars`
 
@@ -57,16 +76,40 @@ No `~/.config`-based credential loading - AWS creds come from the normal AWS
 CLI credential chain, Carbide Portal creds and the Observability license key
 live in `terraform.tfvars`.
 
-## Known Unverified Items (do not treat as settled)
+## Confirmed Live Against a Real Deployment (2026-08-05)
 
 - **SL-Micro AMI filter**: confirmed via a real `aws ec2 describe-images`
-  call against owner `013907871322` on 2026-08-04:
-  `suse-sle-micro-6-*-byos-v*-hvm-ssd-x86_64`. Re-verify if it stops matching.
-- **SL-Micro immutability**: `user-data.sh` scripts avoid `zypper install`
-  entirely (SL-Micro is transactional/read-only) and only write static
-  binaries into `/usr/local/bin`. Unverified on a real instance - if that
-  path turns out read-only too, switch to `transactional-update pkg install`
-  + reboot.
+  call against owner `013907871322`: `suse-sle-micro-6-*-byos-v*-hvm-ssd-x86_64`.
+  Re-verify if it stops matching.
+- **SL-Micro's `/` is read-only, but `/root`/`/var`/`/usr/local` are separate
+  writable btrfs subvolumes** - the `/usr/local` write concern flagged
+  earlier was a non-issue (RKE2's installer correctly falls back to `/opt`
+  when needed, and Helm's `/usr/local/bin` install worked fine). The *real*
+  bug: cloud-init runs `user-data.sh` with `$HOME` unset, so Helm resolves
+  config/cache dirs as relative paths against cwd `/` - which *is* read-only
+  - causing `mkdir .config: read-only file system` right at `helm repo add`.
+  Fixed in all three `user-data.sh` scripts with `export HOME=/root; cd /root`
+  near the top.
+- **`rancher_version`/`cert_manager_version` version-skew**: defaults were
+  ~2 years stale and incompatible with `rke2_version`'s "latest stable"
+  default (chart `kubeVersion` ceiling exceeded). Bumped to current releases
+  compatible with RKE2 1.35.x - see the coupling comments in `common-vars.tf`.
+- **Downstream cluster registration requires bypassing strict CA verification
+  twice, even with a real public Let's Encrypt cert** (not just self-signed
+  setups):
+  1. `system-agent-install.sh` hardcodes `STRICT_VERIFY=true` internally and
+     fatals without a `--ca-checksum` unless the caller sets
+     `CATTLE_AGENT_STRICT_VERIFY=false` in its environment.
+  2. The in-cluster `cattle-cluster-agent` deployment independently defaults
+     to strict verification and `CrashLoopBackOff`s looking for a CA cert
+     file that only gets populated when `--ca-checksum` was used at
+     registration. Fixed by setting `agentEnvVars: STRICT_VERIFY=false` on
+     the `provisioning.cattle.io.cluster` object at creation time.
+  Both fixes are implemented in `Scripts/rgsctl`'s `register_cluster`
+  function (`rgsctl register <module> <cluster-name>`).
+
+## Still Unverified
+
 - **Rancher image source**: default install uses the public
   `rancher-stable/rancher` Helm chart. `rgs_carbide_rancher_image` /
   `rgs_carbide_rancher_chart` vars exist to override with Carbide-hosted
@@ -74,6 +117,9 @@ live in `terraform.tfvars`.
 - **EKS driver credential mechanism**: `eks-cluster/main.tf` creates an IAM
   role, but Rancher's EKS Cloud Credential form may expect a static AWS
   access key/secret instead. Confirm once you have Rancher UI access.
+- **RGS Observability/Security chart source**: not yet confirmed from the
+  Carbide Portal - `rgsctl register` gets the cluster to `Active`, but the
+  actual product Helm install is still a manual step pending this.
 
 ## Registry / Airgap
 

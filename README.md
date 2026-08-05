@@ -87,6 +87,10 @@ EXAMPLES:
     # Retrieve rancher-manager's kubeconfig
     Scripts/rgsctl getkube
 
+    # Find AWS resources tagged/named for this environment but not tracked
+    # in any module's tofu state (add --delete to remove what's found)
+    Scripts/rgsctl orphans
+
     # Destroy all infrastructure (reverse order, with confirmation prompt)
     Scripts/rgsctl destroy
 
@@ -99,13 +103,19 @@ Steps** below for what's left once it finishes.
 
 ## Manual Steps
 
-This is intentionally **not** fully automated - after `rgsctl build`:
+After `rgsctl build`:
 
-1. Log in to Rancher at the `rancher_url` output from `rancher-manager`.
-2. Follow `eks-cluster/README.md` to wire up an AWS Cloud Credential and
-   create the downstream EKS cluster via the Rancher EKS driver.
-3. Follow `observability/README.md` and `security/README.md` to import each
-   node as a custom cluster and Helm-install the corresponding RGS product.
+1. Follow `eks-cluster/README.md` to wire up an AWS Cloud Credential and
+   create the downstream EKS cluster via the Rancher EKS driver - still
+   manual, no reference-repo precedent to automate against yet.
+2. Register the observability/security clusters (automated, no UI clicking):
+   ```bash
+   Scripts/rgsctl register observability observability
+   Scripts/rgsctl register security user-apps
+   ```
+3. Once each cluster shows `Active` in Rancher, `helm install` the
+   corresponding RGS product chart - still manual, since the real Carbide
+   Portal chart source isn't confirmed yet (see `ProjectSpec.md`).
 
 ## Credentials
 
@@ -122,6 +132,13 @@ root `terraform.tfvars`. See `terraform.tfvars.example` for the full list.
 - Registry access uses direct Carbide Portal auth (`registries.yaml`) - no
   Hauler/Harbor mirroring for v1, since this demo is fully internet-connected
   and Hauler's value is specifically airgap asset transfer.
+- The Quick Start's archive-before-clone pattern means a fresh checkout's
+  local state is legitimately empty while previously-deployed resources are
+  still live and tracked in a sibling `rgs-demo-aws-YYYY-MM-DD-NN/` archive.
+  `rgsctl orphans` accounts for this by scanning sibling `rgs-demo-aws*`
+  directories too - but if you delete an old archive directory without
+  running `rgsctl destroy` in it first, its resources become real,
+  untracked orphans in AWS.
 - Several details are flagged `TODO`/unverified in code and READMEs pending
   real Carbide Portal access - see `rancher-manager/README.md` and
   `eks-cluster/README.md`.

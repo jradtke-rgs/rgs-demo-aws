@@ -15,8 +15,10 @@ readonly NC='\033[0m' # No Color
 
 # Project deployment order (CRITICAL: shared-services must be first)
 # eks-cluster/observability/security only provision AWS-side prerequisites in
-# v1 - the actual Rancher-side wiring (EKS driver, custom cluster import,
-# product Helm installs) is a manual step. See each module's README.md.
+# v1. observability/security's custom-cluster registration into Rancher is
+# now automated via `rgsctl register` (see register_cluster below); the EKS
+# driver setup and product Helm installs are still manual - see each
+# module's README.md.
 readonly PROJECTS=(shared-services rancher-manager eks-cluster observability security)
 
 # Modules with a running Kubernetes cluster reachable via the ssh_command
@@ -178,6 +180,503 @@ check_route53_access() {
 }
 
 #######################################
+# Register a bare node as a downstream custom cluster in Rancher, via
+# Rancher's REST API + SSH - no manual UI clicking required. Confirmed live
+# against a real Rancher 2.14.3 instance (2026-08-05).
+#
+# Handles two strict-CA-verification defaults that otherwise break this flow
+# even with a real, publicly-trusted Let's Encrypt cert (not just self-signed
+# setups, as Rancher's own docs might suggest):
+#   1. system-agent-install.sh hardcodes STRICT_VERIFY=true and fatals
+#      without a --ca-checksum unless CATTLE_AGENT_STRICT_VERIFY=false is
+#      set explicitly in its environment.
+#   2. The in-cluster cattle-cluster-agent deployment independently defaults
+#      to strict verification too and CrashLoopBackOffs looking for a CA
+#      cert file that's only populated when a --ca-checksum was used at
+#      registration time. Fixed by setting agentEnvVars: STRICT_VERIFY=false
+#      on the provisioning.cattle.io Cluster object at creation time.
+#
+# Still manual after this: Helm-installing the actual RGS product once the
+# cluster is Active - the real Carbide Portal chart source isn't confirmed
+# yet (see ProjectSpec.md).
+#
+# Arguments:
+#   $1 - module directory (e.g. observability, security)
+#   $2 - cluster name to register in Rancher (e.g. observability, user-apps)
+#######################################
+register_cluster() {
+    local module="$1"
+    local cluster_name="$2"
+
+    if [ -z "$module" ] || [ -z "$cluster_name" ]; then
+        print_msg "${RED}" "ERROR: usage: $(basename "$0") register <module> <cluster-name>"
+        print_msg "${YELLOW}" "Example: $(basename "$0") register observability observability"
+        print_msg "${YELLOW}" "Example: $(basename "$0") register security user-apps"
+        exit 1
+    fi
+
+    check_tofu
+    goto_repo_root
+
+    if ! command -v python3 &> /dev/null; then
+        print_msg "${RED}" "ERROR: python3 is required to parse Rancher API responses"
+        exit 1
+    fi
+
+    if [ ! -d "${module}" ]; then
+        print_msg "${RED}" "ERROR: module directory '${module}' not found"
+        exit 1
+    fi
+
+    print_header "Registering '${cluster_name}' as a downstream cluster (module: ${module})"
+
+    local rancher_url ssh_cmd ssh_key node_ip
+    rancher_url=$(cd rancher-manager && tofu output -raw rancher_url 2>/dev/null)
+    ssh_cmd=$(cd "${module}" && tofu output -raw ssh_command 2>/dev/null)
+
+    if [ -z "$rancher_url" ]; then
+        print_msg "${RED}" "ERROR: could not read rancher_url from rancher-manager's tofu output"
+        print_msg "${YELLOW}" "Make sure rancher-manager has been applied and Rancher has finished bootstrapping"
+        exit 1
+    fi
+
+    if [ -z "$ssh_cmd" ] || [ "$ssh_cmd" = "Use AWS Systems Manager Session Manager to connect" ]; then
+        print_msg "${RED}" "ERROR: no SSH access configured for ${module} - this script drives registration over SSH"
+        print_msg "${YELLOW}" "Set ssh_public_key in terraform.tfvars, or run the registration command manually via SSM"
+        exit 1
+    fi
+
+    ssh_key=$(echo "$ssh_cmd" | grep -o '\-i [^ ]*' | cut -d' ' -f2)
+    node_ip=$(echo "$ssh_cmd" | grep -o 'ec2-user@[^ ]*' | cut -d'@' -f2)
+    ssh_key="${ssh_key/#\~/$HOME}"
+
+    print_msg "${BLUE}" "Rancher: ${rancher_url}"
+    print_msg "${BLUE}" "Target node: ${node_ip}"
+
+    # NOTE: assumes the default bootstrap admin/admin credentials set by
+    # rancher-manager/user-data.sh (--set bootstrapPassword=admin). If you've
+    # since changed the Rancher admin password, this login will fail.
+    local token
+    token=$(curl -sk -X POST "${rancher_url}/v3-public/localProviders/local?action=login" \
+        -H 'Content-Type: application/json' \
+        -d '{"username":"admin","password":"admin","responseType":"json"}' \
+        | python3 -c "import json,sys; print(json.load(sys.stdin).get('token',''))" 2>/dev/null)
+
+    if [ -z "$token" ]; then
+        print_msg "${RED}" "ERROR: failed to log in to Rancher API at ${rancher_url}"
+        print_msg "${YELLOW}" "If you've changed the admin password since bootstrap, update this script's login step"
+        exit 1
+    fi
+    print_msg "${GREEN}" "Logged in to Rancher API"
+
+    # Resolve the RKE2 version to pin on the cluster object so it matches
+    # what the node will actually install: rke2_version if pinned, otherwise
+    # the same "stable" channel RKE2's own installer resolves to.
+    local rke2_ver
+    rke2_ver=$(get_tfvar rke2_version)
+    if [ -z "$rke2_ver" ]; then
+        rke2_ver=$(curl -s https://update.rke2.io/v1-release/channels \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); print(next((c['latest'] for c in d.get('data',[]) if c.get('id')=='stable'), ''))" 2>/dev/null)
+    fi
+    if [ -z "$rke2_ver" ]; then
+        print_msg "${RED}" "ERROR: could not resolve an RKE2 version to pin on the cluster object"
+        exit 1
+    fi
+    print_msg "${BLUE}" "Pinning cluster kubernetesVersion: ${rke2_ver}"
+
+    local existing
+    existing=$(curl -sk "${rancher_url}/v1/provisioning.cattle.io.clusters/fleet-default/${cluster_name}" \
+        -H "Authorization: Bearer ${token}" \
+        | python3 -c "import json,sys; d=json.load(sys.stdin); print('' if d.get('type')=='error' else 'exists')" 2>/dev/null)
+
+    if [ "$existing" = "exists" ]; then
+        print_msg "${YELLOW}" "Cluster '${cluster_name}' already exists in Rancher - reusing it"
+    else
+        local create_resp create_err
+        create_resp=$(curl -sk -X POST "${rancher_url}/v1/provisioning.cattle.io.clusters" \
+            -H "Authorization: Bearer ${token}" \
+            -H 'Content-Type: application/json' \
+            -d "{\"type\":\"provisioning.cattle.io.cluster\",\"metadata\":{\"name\":\"${cluster_name}\",\"namespace\":\"fleet-default\"},\"spec\":{\"kubernetesVersion\":\"${rke2_ver}\",\"rkeConfig\":{},\"agentEnvVars\":[{\"name\":\"STRICT_VERIFY\",\"value\":\"false\"}]}}")
+        create_err=$(echo "$create_resp" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('message','') if d.get('type')=='error' else '')" 2>/dev/null)
+        if [ -n "$create_err" ]; then
+            print_msg "${RED}" "ERROR creating cluster '${cluster_name}': ${create_err}"
+            exit 1
+        fi
+        print_msg "${GREEN}" "Created cluster object '${cluster_name}' (agentEnvVars: STRICT_VERIFY=false)"
+    fi
+
+    print_msg "${BLUE}" "Waiting for Rancher to assign a management cluster ID..."
+    local mgmt_id
+    for i in $(seq 1 20); do
+        mgmt_id=$(curl -sk "${rancher_url}/v1/provisioning.cattle.io.clusters/fleet-default/${cluster_name}" \
+            -H "Authorization: Bearer ${token}" \
+            | python3 -c "import json,sys; print(json.load(sys.stdin).get('status',{}).get('clusterName',''))" 2>/dev/null)
+        [ -n "$mgmt_id" ] && break
+        sleep 3
+    done
+
+    if [ -z "$mgmt_id" ]; then
+        print_msg "${RED}" "ERROR: timed out waiting for a management cluster ID"
+        exit 1
+    fi
+    print_msg "${GREEN}" "Management cluster ID: ${mgmt_id}"
+
+    curl -sk -X POST "${rancher_url}/v3/clusterregistrationtoken" \
+        -H "Authorization: Bearer ${token}" \
+        -H 'Content-Type: application/json' \
+        -d "{\"type\":\"clusterRegistrationToken\",\"clusterId\":\"${mgmt_id}\"}" > /dev/null
+
+    print_msg "${BLUE}" "Fetching the node registration token..."
+    local reg_token
+    for i in $(seq 1 10); do
+        reg_token=$(curl -sk "${rancher_url}/v3/clusterregistrationtokens?clusterId=${mgmt_id}" \
+            -H "Authorization: Bearer ${token}" \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); items=d.get('data',[]); print(items[-1].get('token','') if items else '')" 2>/dev/null)
+        [ -n "$reg_token" ] && break
+        sleep 2
+    done
+
+    if [ -z "$reg_token" ]; then
+        print_msg "${RED}" "ERROR: failed to obtain a node registration token"
+        exit 1
+    fi
+
+    # All-in-one node acting as etcd+controlplane+worker. Server-side
+    # (system-agent) CATTLE_AGENT_STRICT_VERIFY=false pairs with the
+    # agentEnvVars set on the cluster object above.
+    print_msg "${BLUE}" "Running registration command on ${node_ip} (this installs RKE2 on the node)..."
+    ssh -i "$ssh_key" -o StrictHostKeyChecking=no -o ConnectTimeout=10 "ec2-user@${node_ip}" \
+        "curl -fL ${rancher_url}/system-agent-install.sh | sudo CATTLE_AGENT_STRICT_VERIFY=false sh -s - --server ${rancher_url} --label 'cattle.io/os=linux' --token ${reg_token} --etcd --controlplane --worker" \
+        || { print_msg "${RED}" "ERROR: registration command failed on ${node_ip} - check /var/log via SSH"; exit 1; }
+
+    print_msg "${GREEN}" "Registration command completed on ${node_ip}"
+
+    print_msg "${BLUE}" "Waiting for cluster '${cluster_name}' to become Active in Rancher..."
+    local state=""
+    for i in $(seq 1 40); do
+        state=$(curl -sk "${rancher_url}/v1/provisioning.cattle.io.clusters/fleet-default/${cluster_name}" \
+            -H "Authorization: Bearer ${token}" \
+            | python3 -c "import json,sys; print(json.load(sys.stdin).get('metadata',{}).get('state',{}).get('name',''))" 2>/dev/null)
+        print_msg "${YELLOW}" "  [$i/40] state=${state}"
+        [ "$state" = "active" ] && break
+        sleep 15
+    done
+
+    if [ "$state" != "active" ]; then
+        print_msg "${YELLOW}" "WARNING: cluster did not reach Active within the timeout - check the Rancher UI"
+        print_msg "${YELLOW}" "(cattle-cluster-agent can take a few minutes to sync CRDs on first boot)"
+    else
+        print_msg "${GREEN}" "Cluster '${cluster_name}' is Active!"
+    fi
+
+    print_header "Registration Complete"
+    print_msg "${YELLOW}" "Remaining manual step: Helm-install the RGS product chart against this"
+    print_msg "${YELLOW}" "cluster's kubeconfig once you've confirmed the chart source from the"
+    print_msg "${YELLOW}" "Carbide Portal (see ${module}/README.md and ProjectSpec.md)."
+}
+
+#######################################
+# Collect every resource ID (and public_ip, where present) currently
+# tracked across all modules' local tofu state. Used by `orphans` to tell
+# "still managed" apart from "drifted/orphaned in AWS but not in state" -
+# e.g. the aws_key_pair left behind by an interrupted destroy on 2026-08-05.
+# Prints one value per line; safe to call even for modules never applied.
+#######################################
+collect_known_ids() {
+    # This repo's own Quick Start archives an existing checkout (mv to
+    # "<repo>-YYYY-MM-DD-NN") before cloning fresh rather than destroying it
+    # first - so a freshly cloned working copy legitimately has empty state
+    # while the *real* tracked state for still-live resources sits in a
+    # sibling archived directory. Confirmed live 2026-08-05: after several
+    # archive/re-clone cycles, all 5 modules' real state was found only in
+    # one sibling archive dir, while the current checkout's state was an
+    # empty 720-byte skeleton - scanning only "." would have misreported
+    # every live resource as orphaned. Scan every sibling "<repo>*" dir too.
+    local repo_base search_dirs=(".") d
+    repo_base=$(basename "$(pwd)")
+    for d in ../"${repo_base}"*; do
+        [ -d "$d" ] || continue
+        [ "$(cd "$d" && pwd)" = "$(pwd)" ] && continue
+        search_dirs+=("$d")
+    done
+    print_msg "${BLUE}" "  Scanning for state in: ${search_dirs[*]}" >&2
+
+    local base_dir module
+    for base_dir in "${search_dirs[@]}"; do
+        for module in "${PROJECTS[@]}"; do
+            [ -f "${base_dir}/${module}/terraform.tfstate" ] || continue
+            (cd "${base_dir}/${module}" && tofu show -json 2>/dev/null) | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+def walk(mod):
+    for r in mod.get('resources', []):
+        v = r.get('values', {}) or {}
+        for key in ('id', 'public_ip'):
+            val = v.get(key)
+            if val:
+                print(val)
+    for child in mod.get('child_modules', []):
+        walk(child)
+walk(d.get('values', {}).get('root_module', {}))
+" 2>/dev/null
+        done
+    done
+}
+
+#######################################
+# IAM helpers: roles/instance profiles can't be deleted while still
+# attached to policies or each other, so unwind those relationships first.
+#######################################
+rgsctl_delete_iam_role() {
+    local role_name="$1" arn policy_name profile_name
+    for arn in $(aws iam list-attached-role-policies --role-name "$role_name" \
+        --query "AttachedPolicies[].PolicyArn" --output text 2>/dev/null); do
+        aws iam detach-role-policy --role-name "$role_name" --policy-arn "$arn"
+    done
+    for policy_name in $(aws iam list-role-policies --role-name "$role_name" \
+        --query "PolicyNames[]" --output text 2>/dev/null); do
+        aws iam delete-role-policy --role-name "$role_name" --policy-name "$policy_name"
+    done
+    for profile_name in $(aws iam list-instance-profiles-for-role --role-name "$role_name" \
+        --query "InstanceProfiles[].InstanceProfileName" --output text 2>/dev/null); do
+        aws iam remove-role-from-instance-profile --role-name "$role_name" --instance-profile-name "$profile_name"
+    done
+    aws iam delete-role --role-name "$role_name"
+}
+
+rgsctl_delete_iam_instance_profile() {
+    local profile_name="$1" role_name
+    for role_name in $(aws iam get-instance-profile --instance-profile-name "$profile_name" \
+        --query "InstanceProfile.Roles[].RoleName" --output text 2>/dev/null); do
+        aws iam remove-role-from-instance-profile --instance-profile-name "$profile_name" --role-name "$role_name"
+    done
+    aws iam delete-instance-profile --instance-profile-name "$profile_name"
+}
+
+#######################################
+# Route53 helper: DELETE requires the exact existing record set, so fetch
+# it first and issue the change batch via a temp file (avoids shell-quoting
+# a JSON blob).
+#######################################
+rgsctl_delete_route53_record() {
+    local zone_id="$1" fqdn="$2"
+    local rec_file batch_file
+    rec_file=$(mktemp)
+    batch_file=$(mktemp)
+
+    aws route53 list-resource-record-sets --hosted-zone-id "$zone_id" \
+        --query "ResourceRecordSets[?Name=='${fqdn}.' && Type=='A'] | [0]" --output json > "$rec_file" 2>/dev/null
+
+    if ! python3 -c "import json,sys; sys.exit(0 if json.load(open('$rec_file')) else 1)" 2>/dev/null; then
+        print_msg "${YELLOW}" "  Record ${fqdn} already gone"
+        rm -f "$rec_file" "$batch_file"
+        return 0
+    fi
+
+    python3 -c "
+import json
+rec = json.load(open('$rec_file'))
+print(json.dumps({'Changes': [{'Action': 'DELETE', 'ResourceRecordSet': rec}]}))
+" > "$batch_file"
+
+    aws route53 change-resource-record-sets --hosted-zone-id "$zone_id" --change-batch "file://${batch_file}"
+    rm -f "$rec_file" "$batch_file"
+}
+
+#######################################
+# Orphans: find (and optionally delete) AWS resources tagged/named for this
+# environment that aren't tracked in any module's current tofu state - the
+# kind of drift that caused the "key pair already exists" error on
+# 2026-08-05 (an interrupted destroy left the key pair behind in AWS while
+# local state moved on without it).
+#
+# List-only by default; pass --delete to actually remove what's found (asks
+# for confirmation first, same as `destroy`).
+#
+# Covers: EC2 instances, EC2 key pairs, Elastic IPs, security groups, IAM
+# roles/instance profiles/customer-managed policies (all name-prefixed
+# "${environment}-"), and Route53 A records for our three known hostnames
+# (Route53 record sets aren't taggable, so these are flagged by checking
+# whether their target IP matches any currently-tracked EIP/instance, not
+# by ID).
+#######################################
+orphans() {
+    local delete_mode="false"
+    [ "${1:-}" = "--delete" ] && delete_mode="true"
+
+    check_tofu
+    goto_repo_root
+
+    if ! command -v python3 &> /dev/null; then
+        print_msg "${RED}" "ERROR: python3 is required to parse tofu/AWS JSON output"
+        exit 1
+    fi
+
+    print_header "Scanning for Orphaned AWS Resources"
+
+    local environment region
+    environment=$(get_tfvar environment)
+    region=$(get_tfvar aws_region)
+    [ -z "$environment" ] && environment="rgs-demo-aws"
+    [ -z "$region" ] && region="us-east-2"
+    print_msg "${BLUE}" "Environment tag/prefix: ${environment}   Region: ${region}"
+
+    print_msg "${BLUE}" "Collecting resource IDs currently tracked in tofu state..."
+    local known_ids
+    known_ids=$(collect_known_ids)
+    print_msg "${GREEN}" "Found $(echo "$known_ids" | grep -c . || true) known resource IDs/IPs across applied modules"
+
+    is_known() {
+        [ -n "$1" ] && echo "$known_ids" | grep -qxF "$1"
+    }
+
+    local -a o_type=() o_id=() o_label=()
+    add_orphan() { o_type+=("$1"); o_id+=("$2"); o_label+=("$3"); }
+
+    print_msg "${BLUE}" "Checking EC2 instances..."
+    while IFS=$'\t' read -r id name; do
+        [ -z "$id" ] && continue
+        is_known "$id" || add_orphan "instance" "$id" "EC2 instance ${id} (${name})"
+    done < <(aws ec2 describe-instances --region "${region}" \
+        --filters "Name=tag:Environment,Values=${environment}" "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+        --query "Reservations[].Instances[].[InstanceId, Tags[?Key=='Name']|[0].Value]" --output text 2>/dev/null)
+
+    print_msg "${BLUE}" "Checking EC2 key pairs..."
+    while IFS=$'\t' read -r name; do
+        [ -z "$name" ] && continue
+        is_known "$name" || add_orphan "keypair" "$name" "Key pair ${name}"
+    done < <(aws ec2 describe-key-pairs --region "${region}" \
+        --filters "Name=tag:Environment,Values=${environment}" \
+        --query "KeyPairs[].KeyName" --output text 2>/dev/null | tr '\t' '\n')
+
+    print_msg "${BLUE}" "Checking Elastic IPs..."
+    while IFS=$'\t' read -r alloc_id name; do
+        [ -z "$alloc_id" ] && continue
+        is_known "$alloc_id" || add_orphan "eip" "$alloc_id" "Elastic IP ${alloc_id} (${name})"
+    done < <(aws ec2 describe-addresses --region "${region}" \
+        --filters "Name=tag:Environment,Values=${environment}" \
+        --query "Addresses[].[AllocationId, Tags[?Key=='Name']|[0].Value]" --output text 2>/dev/null)
+
+    print_msg "${BLUE}" "Checking security groups..."
+    while IFS=$'\t' read -r sg_id name; do
+        [ -z "$sg_id" ] && continue
+        is_known "$sg_id" || add_orphan "sg" "$sg_id" "Security group ${sg_id} (${name})"
+    done < <(aws ec2 describe-security-groups --region "${region}" \
+        --filters "Name=tag:Environment,Values=${environment}" \
+        --query "SecurityGroups[].[GroupId, GroupName]" --output text 2>/dev/null)
+
+    print_msg "${BLUE}" "Checking IAM roles (prefix ${environment}-)..."
+    while IFS=$'\t' read -r role_name; do
+        [ -z "$role_name" ] && continue
+        case "$role_name" in
+            "${environment}-"*)
+                is_known "$role_name" || add_orphan "iam-role" "$role_name" "IAM role ${role_name}"
+                ;;
+        esac
+    done < <(aws iam list-roles --query "Roles[].RoleName" --output text 2>/dev/null | tr '\t' '\n')
+
+    print_msg "${BLUE}" "Checking IAM instance profiles (prefix ${environment}-)..."
+    while IFS=$'\t' read -r prof_name; do
+        [ -z "$prof_name" ] && continue
+        case "$prof_name" in
+            "${environment}-"*)
+                is_known "$prof_name" || add_orphan "iam-profile" "$prof_name" "IAM instance profile ${prof_name}"
+                ;;
+        esac
+    done < <(aws iam list-instance-profiles --query "InstanceProfiles[].InstanceProfileName" --output text 2>/dev/null | tr '\t' '\n')
+
+    print_msg "${BLUE}" "Checking IAM customer-managed policies (prefix ${environment}-)..."
+    while IFS=$'\t' read -r policy_arn policy_name; do
+        [ -z "$policy_arn" ] && continue
+        case "$policy_name" in
+            "${environment}-"*)
+                is_known "$policy_arn" || add_orphan "iam-policy" "$policy_arn" "IAM policy ${policy_name}"
+                ;;
+        esac
+    done < <(aws iam list-policies --scope Local --query "Policies[].[Arn, PolicyName]" --output text 2>/dev/null)
+
+    print_msg "${BLUE}" "Checking Route53 A records..."
+    local root_domain subdomain zone_id
+    root_domain=$(get_tfvar root_domain)
+    subdomain=$(get_tfvar subdomain)
+    zone_id=$(get_tfvar route53_zone_id)
+    if [ -z "$zone_id" ] && [ -n "$root_domain" ] && [ -n "$subdomain" ]; then
+        zone_id=$(aws route53 list-hosted-zones-by-name --dns-name "${subdomain}.${root_domain}" \
+            --query "HostedZones[?Name=='${subdomain}.${root_domain}.'].Id | [0]" --output text 2>/dev/null)
+    fi
+    zone_id="${zone_id#/hostedzone/}"
+
+    if [ -n "$zone_id" ] && [ "$zone_id" != "None" ] && [ -n "$root_domain" ] && [ -n "$subdomain" ]; then
+        local hostname_var hn fqdn record_ip
+        for hostname_var in hostname_rancher hostname_observability hostname_userapps; do
+            hn=$(get_tfvar "$hostname_var")
+            [ -z "$hn" ] && continue
+            fqdn="${hn}.${subdomain}.${root_domain}"
+            record_ip=$(aws route53 list-resource-record-sets --hosted-zone-id "$zone_id" \
+                --query "ResourceRecordSets[?Name=='${fqdn}.' && Type=='A'].ResourceRecords[0].Value | [0]" \
+                --output text 2>/dev/null)
+            if [ -n "$record_ip" ] && [ "$record_ip" != "None" ] && ! is_known "$record_ip"; then
+                add_orphan "route53" "${zone_id}|${fqdn}" "Route53 A record ${fqdn} -> ${record_ip} (not a currently tracked IP)"
+            fi
+        done
+    else
+        print_msg "${YELLOW}" "  Skipping Route53 check (could not resolve zone_id/root_domain/subdomain)"
+    fi
+
+    print_header "Results"
+
+    if [ "${#o_type[@]}" -eq 0 ]; then
+        print_msg "${GREEN}" "No orphaned resources found."
+        return 0
+    fi
+
+    local i
+    for i in "${!o_type[@]}"; do
+        print_msg "${YELLOW}" "  - ${o_label[$i]}"
+    done
+
+    if [ "$delete_mode" != "true" ]; then
+        echo
+        print_msg "${BLUE}" "Re-run with --delete to remove these."
+        return 0
+    fi
+
+    echo
+    print_msg "${RED}" "WARNING: about to delete the ${#o_type[@]} resource(s) listed above."
+    read -r -p "Are you sure you want to continue? (yes/no): " confirm
+    if [ "${confirm}" != "yes" ]; then
+        print_msg "${YELLOW}" "Cancelled - nothing deleted"
+        return 0
+    fi
+
+    local delete_status
+    for i in "${!o_type[@]}"; do
+        print_msg "${YELLOW}" "Deleting: ${o_label[$i]}"
+        delete_status=0
+        case "${o_type[$i]}" in
+            instance)     aws ec2 terminate-instances --region "$region" --instance-ids "${o_id[$i]}" > /dev/null || delete_status=$? ;;
+            keypair)      aws ec2 delete-key-pair --region "$region" --key-name "${o_id[$i]}" || delete_status=$? ;;
+            eip)          aws ec2 release-address --region "$region" --allocation-id "${o_id[$i]}" || delete_status=$? ;;
+            sg)           aws ec2 delete-security-group --region "$region" --group-id "${o_id[$i]}" || delete_status=$? ;;
+            iam-role)     rgsctl_delete_iam_role "${o_id[$i]}" || delete_status=$? ;;
+            iam-profile)  rgsctl_delete_iam_instance_profile "${o_id[$i]}" || delete_status=$? ;;
+            iam-policy)   aws iam delete-policy --policy-arn "${o_id[$i]}" || delete_status=$? ;;
+            route53)      rgsctl_delete_route53_record "${o_id[$i]%%|*}" "${o_id[$i]#*|}" || delete_status=$? ;;
+        esac
+        if [ "$delete_status" -eq 0 ]; then
+            print_msg "${GREEN}" "  Deleted"
+        else
+            print_msg "${RED}" "  Failed - check manually"
+        fi
+    done
+
+    print_header "Cleanup Complete!"
+}
+
+#######################################
 # Build: Deploy all infrastructure
 #######################################
 build() {
@@ -214,10 +713,10 @@ build() {
 
     print_header "Deployment Complete!"
     print_msg "${GREEN}" "AWS-side infrastructure has been deployed."
-    print_msg "${YELLOW}" "Remaining manual steps (see eks-cluster/, observability/, security/ READMEs):"
-    echo "  - Create the EKS downstream cluster via the Rancher EKS driver"
-    echo "  - Import the observability node as a custom cluster, then Helm-install RGS Observability"
-    echo "  - Import the user-apps node as a custom cluster, then Helm-install RGS Security"
+    print_msg "${YELLOW}" "Next steps:"
+    echo "  - Create the EKS downstream cluster via the Rancher EKS driver (see eks-cluster/README.md)"
+    echo "  - $(basename "$0") register observability observability   # then Helm-install RGS Observability"
+    echo "  - $(basename "$0") register security user-apps             # then Helm-install RGS Security"
 }
 
 #######################################
@@ -382,6 +881,20 @@ OPTIONS:
                 hosted zone configured in terraform.tfvars (runs
                 automatically as part of build)
 
+    register <module> <cluster-name>
+                Register a bare observability/security node as a downstream
+                custom cluster in Rancher via its REST API + SSH - no manual
+                UI clicking required. Requires rancher-manager to be up.
+                Still manual after this: Helm-installing the actual RGS
+                product once the cluster is Active (chart source TBD).
+
+    orphans [--delete]
+                Scan for AWS resources tagged/named for this environment
+                that aren't tracked in any module's current tofu state -
+                e.g. a key pair left behind by an interrupted destroy. Lists
+                by default; pass --delete to actually remove what's found
+                (asks for confirmation first).
+
     help        Display this help message
 
 DEPLOYMENT ORDER:
@@ -393,18 +906,23 @@ DEPLOYMENT ORDER:
 
 MANUAL STEPS (not automated in v1 - see each module's README.md):
     - Creating the EKS downstream cluster via the Rancher EKS driver
-    - Importing observability/security nodes as custom clusters in Rancher
-    - Helm-installing RGS Observability / RGS Security once clusters are Active
+    - Helm-installing RGS Observability / RGS Security once their clusters
+      are registered (via 'register') and Active - chart source TBD
 
 PREREQUISITES:
     - AWS CLI configured with valid credentials
     - OpenTofu >= 1.5.0 installed
+    - python3 (for 'register' - parses Rancher API JSON responses)
     - terraform.tfvars in the repo root (copy from terraform.tfvars.example)
 
 EXAMPLES:
     $(basename "$0") build
     $(basename "$0") output
     $(basename "$0") getkube
+    $(basename "$0") register observability observability
+    $(basename "$0") register security user-apps
+    $(basename "$0") orphans
+    $(basename "$0") orphans --delete
     $(basename "$0") destroy
 
 For more information, see: https://github.com/jradtke-rgs/rgs-demo-aws
@@ -432,6 +950,12 @@ main() {
         checkdns)
             goto_repo_root
             check_route53_access
+            ;;
+        register)
+            register_cluster "$2" "$3"
+            ;;
+        orphans)
+            orphans "$2"
             ;;
         help|--help|-h)
             show_help
