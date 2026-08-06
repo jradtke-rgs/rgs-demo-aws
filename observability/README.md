@@ -1,56 +1,42 @@
 # observability
 
-Provisions the AWS node for RGS Observability's **own downstream RKE2
-cluster** (deliberately separate from the `rancher-manager` node, per this
-session's decision). Optional module - see `ProjectSpec.md`.
+RGS Observability runs on its **own downstream RKE2 cluster** (deliberately
+separate from the `rancher-manager` node), provisioned **from Rancher
+itself** via its EC2 node driver - not by OpenTofu. There's nothing left
+for this directory's `.tf` files to manage; it's docs plus the product
+install script. Optional module - see `ProjectSpec.md`.
 
-```bash
-cd observability
-tofu init
-tofu plan  -var-file=../terraform.tfvars
-tofu apply -var-file=../terraform.tfvars
-```
+## Creating the cluster
 
-## Registering the cluster
-
-```bash
-Scripts/rgsctl register observability observability
-```
-
-This logs into Rancher's REST API, creates the `observability` custom
-cluster object, and runs the node registration command over SSH - no manual
-UI clicking required. Confirmed working live against a real Rancher 2.14.3
-instance (2026-08-05). See `Scripts/rgsctl`'s `register_cluster` function for
-the two strict-CA-verification workarounds this needed (both required even
-though this demo uses a real, publicly-trusted Let's Encrypt cert).
-
-If you'd rather do it by hand instead: in Rancher, **Cluster Management →
-Import Existing** (or **Create → Custom**), name it `observability`, copy the
-generated registration command, and run it on this node (`tofu output
-ssh_command`) - but you'll need to add `CATTLE_AGENT_STRICT_VERIFY=false`
-before `sh -s -` in that command and set `agentEnvVars: STRICT_VERIFY=false`
-on the cluster object first, or `cattle-cluster-agent` will crash-loop.
+1. Make sure `rancher-cloud-credential` has been applied and its Cloud
+   Credential added in Rancher (**Cluster Management → Cloud Credentials →
+   Create → Amazon**) - see that module's README.
+2. In Rancher: **Cluster Management → Create → Custom** (or your RKE2
+   node-driver option), name it `observability`, select the Cloud
+   Credential, and configure the node (matches what we'd previously sized
+   by hand: `m5.4xlarge`/16 vCPU-64GB minimum for the `10-nonha` profile -
+   see the sizing note below).
+3. Wait for the cluster to reach `Active`.
+4. DNS is now a manual step, since OpenTofu no longer knows the node's IP
+   ahead of time: once you know it (Rancher UI or the node driver's own
+   output), create a Route53 A record for
+   `hostname_observability.subdomain.root_domain` (from `terraform.tfvars`)
+   pointing at it, if you want the same clean hostname as before.
 
 ## Installing RGS Observability
 
-Once the cluster shows `Active` in Rancher, run `install-rgs-observability.sh`
-on the node (over SSH, as root) - confirmed working end-to-end 2026-08-05:
+Once the cluster shows `Active`, run `install-rgs-observability.sh` on the
+node (over SSH, as root) - confirmed working end-to-end 2026-08-05:
 
 ```bash
-# rancher_url/observability_url/observability_hostname are derived outputs
-# (from hostname_rancher/hostname_observability + subdomain + root_domain) -
-# no need to retype the domain here.
 RANCHER_URL=$(cd rancher-manager && tofu output -raw rancher_url)
-OBSERVABILITY_BASE_URL=$(cd observability && tofu output -raw observability_url)
-OBSERVABILITY_HOSTNAME=$(cd observability && tofu output -raw observability_hostname)
-OBSERVABILITY_IP=$(cd observability && tofu output -raw public_ip)
 
-ssh -i ~/.ssh/rgs-demo-aws.pem "ec2-user@${OBSERVABILITY_IP}" \
+ssh -i ~/.ssh/rgs-demo-aws.pem "ec2-user@<observability-node-ip>" \
   "sudo RGS_OBSERVABILITY_LICENSE='<from Carbide Portal>' \
    RGS_OBSERVABILITY_ADMIN_PASSWORD='<generate one - see script header>' \
    RGS_RANCHER_URL='${RANCHER_URL}' \
-   RGS_OBSERVABILITY_BASE_URL='${OBSERVABILITY_BASE_URL}' \
-   RGS_OBSERVABILITY_HOSTNAME='${OBSERVABILITY_HOSTNAME}' \
+   RGS_OBSERVABILITY_BASE_URL='https://<hostname_observability>.<subdomain>.<root_domain>' \
+   RGS_OBSERVABILITY_HOSTNAME='<hostname_observability>.<subdomain>.<root_domain>' \
    RGS_CARBIDE_REGISTRY='registry.ranchercarbide.dev' \
    bash -s" < observability/install-rgs-observability.sh
 ```
@@ -73,25 +59,20 @@ about if you're debugging a variation of this:
   own `/v2/<repo>/tags/list` before concluding it's a credentials/entitlement
   problem). Re-verify next time - Carbide's mirror will have caught up
   further by then, and a newer chart version may work.
-- **`registries.yaml` gets wiped on every node reboot/plan reconcile**:
-  Rancher's system-agent re-applies its machine plan (which doesn't know
-  about our out-of-band registry config) any time it reconciles, including
-  after a `tofu apply` that resizes/restarts the instance. If you see
-  `401 ... failed to fetch anonymous token` again after any node restart,
-  re-check `/etc/rancher/rke2/registries.yaml` isn't 0 bytes before assuming
-  the credentials broke - re-stage it and `systemctl restart rke2-server` if so.
-- **Sizing**: `observability_instance_type` defaults to `m5.4xlarge` (16
-  vCPU/64GB) - confirmed live minimum for the `10-nonha` profile once the
-  *entire* stack schedules together (hit `Insufficient cpu` at ~95%
-  allocated on a `t3.2xlarge` otherwise). A burstable T-family instance is
-  also the wrong class here regardless of size - this is a sustained
-  multi-service backend, and the scheduler's admission check is based on
-  declared resource requests, not actual usage/burst credits, so bursting
-  doesn't help it schedule more.
-
-## Note
-
-`user-data.sh` only pre-stages Carbide registry auth
-(`/etc/rancher/rke2/registries.yaml`) - it does not install RKE2. Rancher's
-custom-cluster registration command installs RKE2/the system-agent itself
-when you run it on the node.
+- **Why this module no longer stages `registries.yaml` itself**: the
+  previous bare-node design pre-staged Carbide auth via
+  `/etc/rancher/rke2/registries.yaml` in `user-data.sh` - but Rancher's
+  system-agent re-applies its own machine plan on every reconcile (any
+  reboot, any resize) and wiped that file every time, since the plan didn't
+  know about our out-of-band config. That's exactly why `rancher-manager`
+  now configures Carbide as Rancher's `system-default-registry` instead
+  (see its README) - Rancher-provisioned nodes (like this one) inherit that
+  centrally, and it survives reconciliation because Rancher owns re-applying
+  it.
+- **Sizing**: `m5.4xlarge` (16 vCPU/64GB) confirmed live as the minimum for
+  the `10-nonha` profile once the *entire* stack schedules together (hit
+  `Insufficient cpu` at ~95% allocated on a `t3.2xlarge` otherwise). A
+  burstable T-family instance is also the wrong class here regardless of
+  size - this is a sustained multi-service backend, and the scheduler's
+  admission check is based on declared resource requests, not actual
+  usage/burst credits, so bursting doesn't help it schedule more.

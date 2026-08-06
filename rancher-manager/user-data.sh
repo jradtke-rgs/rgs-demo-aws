@@ -250,6 +250,60 @@ echo "Waiting for Rancher deployment to be available..."
 kubectl -n cattle-system wait --for=condition=available --timeout=600s deployment/rancher
 kubectl -n cattle-system wait --for=condition=ready --timeout=600s pod -l app=rancher
 
+#######################################
+# Configure Carbide as Rancher's system-default-registry
+#######################################
+# Downstream clusters Rancher provisions (EC2 node driver, EKS driver) get
+# no out-of-band registries.yaml from us anymore - Rancher itself pushes
+# registry config to every node/cluster it manages via this mechanism, and
+# (unlike our own out-of-band file) it survives Rancher's own plan
+# reconciliation since Rancher is the one re-applying it.
+#
+# TODO (unverified): this is the standard Rancher mechanism (the
+# system-default-registry Setting + a Private Registry credential Secret),
+# but not yet confirmed live against an actual node-template/EKS cluster
+# creation - see rancher-manager/README.md for the manual UI fallback if a
+# downstream node doesn't actually pick this up. Deliberately non-fatal
+# (warnings, not `exit 1`) so a problem here can't break an otherwise-
+# working Rancher install.
+%{ if rgs_carbide_username != "" && rgs_carbide_password != "" ~}
+echo "Configuring Carbide as Rancher's system-default-registry..."
+
+echo "Waiting for the system-default-registry Setting to exist..."
+registry_setting_ready=false
+for i in $(seq 1 30); do
+  if kubectl get settings.management.cattle.io system-default-registry > /dev/null 2>&1; then
+    registry_setting_ready=true
+    break
+  fi
+  sleep 5
+done
+
+if [ "$registry_setting_ready" = "true" ]; then
+  if kubectl patch settings.management.cattle.io system-default-registry \
+    --type=merge -p "{\"value\":\"${rgs_carbide_registry}\"}"; then
+    echo "system-default-registry set to ${rgs_carbide_registry}"
+  else
+    echo "WARNING: failed to patch system-default-registry - configure it manually (Settings -> Advanced Settings)"
+  fi
+
+  if kubectl create secret docker-registry cattle-private-registry \
+    --namespace cattle-system \
+    --docker-server="${rgs_carbide_registry}" \
+    --docker-username="${rgs_carbide_username}" \
+    --docker-password="${rgs_carbide_password}" \
+    --dry-run=client -o yaml | kubectl apply -f -; then
+    echo "Carbide credentials Secret cattle-private-registry created"
+  else
+    echo "WARNING: failed to create the Private Registry credentials Secret - configure it manually (Settings -> Private Registry)"
+  fi
+else
+  echo "WARNING: system-default-registry Setting never appeared - skipping (configure manually via Settings -> Advanced Settings)"
+fi
+%{ else ~}
+echo "No Carbide Portal credentials provided - skipping system-default-registry configuration"
+%{ endif ~}
+
 echo "Rancher installation complete!"
 echo "Access Rancher at: https://${hostname}"
 echo "Bootstrap password: admin"

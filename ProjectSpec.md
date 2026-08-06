@@ -67,25 +67,18 @@ This repo will resemble https://github.com/cloudxabide/suse-demo-aws
   Since this demo is fully internet-connected, nodes authenticate to Carbide
   directly via RKE2's `registries.yaml`. Harbor (mirroring your own registry)
   is a possible future add-on, not v1.
-* **Downstream clusters**: three, all new territory vs. the reference repo:
-  - EKS cluster, provisioned from Rancher via the RGS EKS driver.
-  - RGS Observability gets its **own** downstream RKE2 cluster.
-  - RGS Security is demoed on a separate downstream RKE2 cluster at
-    `user-apps.rgs-demo-aws.kubernerdes.com`.
-  For v1, the AWS-side infrastructure (nodes/IAM/networking) for all three is
-  scaffolded in OpenTofu, but the Rancher-side wiring (EKS driver setup,
-  custom cluster import, product Helm installs) is a documented manual step -
-  converting to full `rancher2`-provider automation is deferred until that
-  flow is validated against a real Rancher instance.
+* **Downstream clusters**: three, all new territory vs. the reference repo -
+  EKS (via the RGS EKS driver), RGS Observability's own cluster, and RGS
+  Security's demo cluster at `user-apps.rgs-demo-aws.kubernerdes.com`.
+  **Superseded 2026-08-06** - see "Architecture Pivot" below for how these
+  actually get created now.
 * **AMI**: SL-Micro naming confirmed via a live `aws ec2 describe-images`
   call (2026-08-04): `suse-sle-micro-6-*-byos-v*-hvm-ssd-x86_64`, owner
   account `013907871322`.
 * Repo scaffolding lives in `shared-services/`, `rancher-manager/`,
-  `eks-cluster/`, `observability/`, `security/`, plus `Scripts/rgsctl`
-  (adapted from `suse-demo-aws`'s `democtl`). See `CLAUDE.md` for the full
-  breakdown and the list of still-unverified assumptions (Rancher's actual
-  EKS Cloud Credential mechanism, whether the public `rancher-stable` chart
-  vs. a Carbide-hosted chart should be used).
+  `rancher-cloud-credential/` (renamed from `eks-cluster/` 2026-08-06),
+  `observability/`, `security/`, plus `Scripts/rgsctl` (adapted from
+  `suse-demo-aws`'s `democtl`). See `CLAUDE.md` for the full breakdown.
 
 ## Findings From the First Real Deployment (2026-08-05)
 
@@ -98,14 +91,14 @@ This repo will resemble https://github.com/cloudxabide/suse-demo-aws
   were ~2 years stale and incompatible with `rke2_version`'s "latest stable"
   default (chart `kubeVersion` ceilings exceeded). Bumped to current,
   RKE2-1.35.x-compatible releases.
-* **Downstream cluster registration is now automated**
+* **[Superseded 2026-08-06] Downstream cluster registration was automated**
   (`rgsctl register <module> <cluster-name>`) via Rancher's REST API + SSH -
-  no `rancher2` Terraform provider needed after all, and no manual UI
-  clicking. Required bypassing strict CA verification in two separate places
-  (the node install script and the in-cluster `cattle-cluster-agent`) even
-  though this demo uses a real, publicly-trusted Let's Encrypt cert - see
-  `CLAUDE.md` for the exact mechanism. Still manual: the EKS driver setup and
-  the actual RGS product Helm install (chart source still unconfirmed).
+  worked (confirmed live), but replaced by the Rancher-driven approach in
+  "Architecture Pivot" below. Kept for context: this is where the two
+  strict-CA-verification workarounds were discovered (see `CLAUDE.md`), and
+  where it was confirmed that Rancher's Cloud Credential mechanism wants
+  static secrets rather than anything fancier - directly informing the
+  pivot's IAM-user-+-key design.
 * Let's Encrypt **production** has a real rate limit (5 duplicate certs per
   exact hostname per rolling 7 days) that repeated `rancher-manager` rebuilds
   can hit quickly during iteration - switch `letsencrypt_environment` to
@@ -117,10 +110,45 @@ This repo will resemble https://github.com/cloudxabide/suse-demo-aws
   images sourced from Carbide (`registry.ranchercarbide.dev` - the earlier
   `rgcrprod.azurecr.us` default was simply wrong, found via web research
   before real Portal access existed). Also required: `local-path-provisioner`
-  (RKE2 has no default StorageClass) and re-staging `registries.yaml` after
-  reboots (Rancher's agent wipes it on every plan reconcile). Bumped
-  `observability_instance_type` to `m5.4xlarge` (16 vCPU/64GB, non-burstable)
-  - `t3.2xlarge` hit a real CPU scheduling ceiling once the full "10-nonha"
-  stack ran together. Full writeup: `observability/README.md` and `CLAUDE.md`.
+  (RKE2 has no default StorageClass). Real minimum sizing: `m5.4xlarge` (16
+  vCPU/64GB, non-burstable) - `t3.2xlarge` hit a real CPU scheduling ceiling
+  once the full "10-nonha" stack ran together. Full writeup:
+  `observability/README.md` and `CLAUDE.md`.
 * RGS Security's chart source is still unconfirmed - same category of
   problem, not yet worked through.
+
+## Architecture Pivot: Rancher-Driven Downstream Clusters (2026-08-06)
+
+Regrouped on the overall approach after getting `rgsctl register` +
+Observability's install fully working live: that approach - OpenTofu
+provisions a bare EC2 instance, then a custom script imports it into
+Rancher over SSH + REST API - isn't how Rancher is meant to be used.
+Rancher has its own **EC2 node driver** (for custom/RKE2 clusters) and
+**EKS driver**, both of which provision the downstream infrastructure
+themselves once given an AWS credential.
+
+New model: OpenTofu's job stops at "Rancher Manager is running."
+Everything downstream - Observability's cluster, the `user-apps`/Security
+cluster, EKS - is created **from Rancher itself**, using one shared IAM
+credential (`rancher-cloud-credential`, renamed from `eks-cluster/`) that
+OpenTofu creates and destroys automatically. This resolves what was
+flagged as unverified when `eks-cluster/` was first scaffolded: Rancher's
+node drivers only support static AWS access key/secret Cloud Credentials
+in the UI, no assumable-role option - confirmed, not just likely, once
+`rgsctl register` proved out that same "Rancher wants static secrets"
+pattern for cluster registration tokens.
+
+Also decided: add Carbide as Rancher's global `system-default-registry`
+(`rancher-manager/user-data.sh`, automated but unverified live) - this is
+what propagates Carbide auth to every node/cluster Rancher subsequently
+provisions, replacing the out-of-band `registries.yaml` staging that kept
+getting wiped by Rancher's own plan reconciliation.
+
+`observability/` and `security/` lost their `.tf` files entirely (nothing
+left for OpenTofu to manage there) but keep their READMEs and, for
+Observability, `install-rgs-observability.sh` - that script doesn't care
+how the cluster came to exist, so nothing about the confirmed-working
+install needed to change. Full breakdown: `CLAUDE.md`.
+
+Note: the older "bare EC2 + manual EC2 deployment" pattern still lives on
+in the separate `suse-demo-aws` repo, by design - that repo isn't changing.

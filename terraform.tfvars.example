@@ -1,12 +1,14 @@
 # =============================================================================
 # RGS Demo AWS - Unified Configuration File
 # =============================================================================
-# This single terraform.tfvars file contains configuration for all modules:
+# This single terraform.tfvars file contains configuration for the OpenTofu-
+# managed modules:
 #   - shared-services/
 #   - rancher-manager/
-#   - eks-cluster/
-#   - observability/
-#   - security/
+#   - rancher-cloud-credential/
+#
+# observability/ and security/ have no .tf files - their downstream clusters
+# are created from Rancher itself, not OpenTofu. See their READMEs.
 #
 # Usage: Each module should reference this file via:
 #   tofu apply -var-file=../terraform.tfvars
@@ -49,16 +51,14 @@ ssh_public_key = "" ##UPDATE##
 # NOTE: each product module creates its own <environment>-<module>-key key pair from this public key
 
 # -----------------------------------------------------------------------------
-# EC2 Instance Configuration (per module)
+# EC2 Instance Configuration (rancher-manager only - Observability/Security's
+# downstream clusters are created from Rancher itself now, sized via its own
+# node-template UI. For reference: m5.4xlarge/16 vCPU-64GB confirmed as the
+# real minimum for Observability's "10-nonha" profile - see
+# observability/README.md)
 # -----------------------------------------------------------------------------
-rancher_instance_type      = "t3.large"
-rancher_root_volume_size   = 100
-
-observability_instance_type    = "m5.4xlarge"  # confirmed minimum for the "10-nonha" sizing profile - non-burstable
-observability_root_volume_size = 300           # Elasticsearch/Kafka/HBase/ClickHouse need persistent storage
-
-security_instance_type    = "t3.large"
-security_root_volume_size = 100
+rancher_instance_type    = "t3.large"
+rancher_root_volume_size = 100
 
 # -----------------------------------------------------------------------------
 # Elastic IP Configuration (all product modules)

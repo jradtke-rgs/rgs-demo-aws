@@ -17,6 +17,19 @@ written into `/etc/rancher/rke2/registries.yaml` on the node so containerd can
 authenticate to the Carbide Secured Registry (`registry.ranchercarbide.dev`) directly.
 No Hauler/Harbor mirroring for v1 - this demo is fully internet-connected.
 
+`user-data.sh` also configures Carbide as Rancher's global
+**`system-default-registry`**, plus a Private Registry credentials Secret,
+right after Rancher's own install succeeds. This is what propagates Carbide
+auth to every downstream cluster/node Rancher subsequently provisions (its
+EC2 node driver, its EKS driver) - those clusters no longer get an
+out-of-band `registries.yaml` from us the way the old bare-node design did,
+so this is the replacement mechanism. **Unverified against a real
+node-template/EKS creation as of this writing** - the step is deliberately
+non-fatal (logs a warning, doesn't abort the script) in case it needs
+adjusting. Manual fallback if a downstream node doesn't pick it up: Rancher
+UI → **Settings → Advanced Settings → `system-default-registry`**, plus
+**Settings → Private Registry** for the credentials.
+
 ## Confirmed live (2026-08-05)
 
 - **SL-Micro AMI filter**: `main.tf` uses `suse-sle-micro-6-*-byos-v*-hvm-ssd-x86_64`

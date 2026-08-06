@@ -7,43 +7,61 @@ This file provides guidance to Claude Code when working with code in this reposi
 OpenTofu infrastructure-as-code for an RGS (Rancher Government Solutions)
 product demo in AWS. Modeled on [suse-demo-aws](https://github.com/cloudxabide/suse-demo-aws)
 but adapted for RGS/Carbide specifics: SL-Micro instead of SLES, RKE2 instead
-of K3s, Carbide Secured Registry auth instead of SUSEConnect/SCC, and a
-downstream-cluster story (EKS via the Rancher EKS driver, plus separate
-Observability and Security downstream clusters) that the reference repo never
-needed. Full spec and decision log: `ProjectSpec.md`.
+of K3s, Carbide Secured Registry auth instead of SUSEConnect/SCC. Full spec
+and decision log: `ProjectSpec.md`.
+
+**Architecture pivot (2026-08-06)**: OpenTofu's job stops at "Rancher
+Manager is running." Everything downstream (RGS Observability's cluster,
+the `user-apps` cluster for RGS Security, EKS) is created **from Rancher
+itself** via its EC2 node driver and EKS driver, using a Cloud Credential
+OpenTofu creates once. This replaced an earlier design where
+`observability`/`security` provisioned bare EC2 instances that got imported
+into Rancher via a custom `rgsctl register` SSH+REST-API script - that
+worked (confirmed live) but wasn't how Rancher is meant to be used. See
+"Confirmed Live" below for what's preserved from that earlier design.
 
 ## Architecture
 
 1. **shared-services/** - VPC, subnets, security groups. Deploy first, destroy last.
 2. **rancher-manager/** - single-node RKE2 + Rancher (mandatory).
-3. **eks-cluster/** - AWS IAM plumbing for the Rancher EKS driver. No EC2 instance.
-4. **observability/** - bare EC2 node for RGS Observability's own downstream RKE2 cluster.
-5. **security/** - bare EC2 node for the `user-apps` downstream RKE2 cluster (RGS Security demo).
+3. **rancher-cloud-credential/** - IAM user + access key for Rancher's EC2
+   node driver and EKS driver (one shared credential, both driver types).
+   No EC2 instance.
+4. **observability/** - docs + `install-rgs-observability.sh` (the product
+   Helm install). No `.tf` files - the cluster itself is created from
+   Rancher's UI, not OpenTofu.
+5. **security/** - docs only, no `.tf` files, no product install script yet
+   (RGS Security's chart source is still unconfirmed).
 
-All product modules depend on `shared-services/terraform.tfstate` via
-`terraform_remote_state`. Never modify `shared-services` after other modules
-are deployed.
+`rancher-manager` and `rancher-cloud-credential` depend on
+`shared-services/terraform.tfstate` via `terraform_remote_state`. Never
+modify `shared-services` after other modules are deployed.
 
-**v1 scope boundary**: `eks-cluster`, `observability`, and `security` only
-provision AWS-side infrastructure via OpenTofu. Downstream custom-cluster
-*registration* for observability/security is now automated (`rgsctl register
-<module> <cluster-name>` - REST API + SSH, no Terraform `rancher2` provider
-involved, confirmed live 2026-08-05). Still manual: the EKS driver setup
-(`eks-cluster/README.md`) and the actual RGS product Helm installs, since the
-real Carbide Portal chart source isn't confirmed yet.
+**v1 scope boundary**: `rancher-cloud-credential`'s IAM policy is a
+starting point covering both driver types, not verified against Rancher's
+official minimum-IAM-policy docs. Once a Cloud Credential is created in
+Rancher, actually creating the downstream clusters (EC2 node driver for
+Observability/`user-apps`, EKS driver for EKS) is manual via the Rancher
+UI - no `rancher2`-Terraform-provider automation yet, and no
+API-driven script either (unlike the retired `rgsctl register`, since
+that whole approach is what's being moved away from). The actual RGS
+product Helm installs are likewise manual except for Observability, which
+has a confirmed-working script.
 
 ## Common Commands
 
 ```bash
 Scripts/rgsctl checkdns   # preflight: verify AWS creds can see the Route53 zone in terraform.tfvars
-Scripts/rgsctl build      # deploy shared-services, rancher-manager, eks-cluster, observability, security in order (runs checkdns first)
+Scripts/rgsctl build      # deploy shared-services, rancher-manager, rancher-cloud-credential in order (runs checkdns first)
 Scripts/rgsctl output     # show outputs from every module
-Scripts/rgsctl getkube    # grab rancher-manager's kubeconfig (only module with one until manual import happens)
-Scripts/rgsctl register observability observability   # register the bare node as a downstream cluster
-Scripts/rgsctl register security user-apps             # same, for the Security demo cluster
+Scripts/rgsctl getkube    # grab rancher-manager's kubeconfig (only module with one)
 Scripts/rgsctl orphans [--delete]   # find/remove AWS resources not tracked in any module's tofu state
 Scripts/rgsctl destroy    # tear down in reverse order, with confirmation prompt
 ```
+
+Everything downstream of `build` (creating the Observability/`user-apps`/EKS
+clusters, and their product installs) happens in the Rancher UI now - see
+`rancher-cloud-credential/README.md`.
 
 `checkdns` treats read access to the hosted zone as a proxy for write access
 (no IAM policy simulation, no create/delete probe record) - if the zone is
@@ -94,19 +112,20 @@ live in `terraform.tfvars`.
   ~2 years stale and incompatible with `rke2_version`'s "latest stable"
   default (chart `kubeVersion` ceiling exceeded). Bumped to current releases
   compatible with RKE2 1.35.x - see the coupling comments in `common-vars.tf`.
-- **Downstream cluster registration requires bypassing strict CA verification
-  twice, even with a real public Let's Encrypt cert** (not just self-signed
-  setups):
+- **[Superseded 2026-08-06, kept for context] Downstream cluster registration
+  requires bypassing strict CA verification twice, even with a real public
+  Let's Encrypt cert** (not just self-signed setups) - this was discovered
+  while building the now-retired `rgsctl register` bare-node-import flow,
+  and is worth knowing if you ever hit the same path manually (e.g. via
+  Rancher's "Import Existing" for a node provisioned some other way):
   1. `system-agent-install.sh` hardcodes `STRICT_VERIFY=true` internally and
      fatals without a `--ca-checksum` unless the caller sets
      `CATTLE_AGENT_STRICT_VERIFY=false` in its environment.
   2. The in-cluster `cattle-cluster-agent` deployment independently defaults
      to strict verification and `CrashLoopBackOff`s looking for a CA cert
      file that only gets populated when `--ca-checksum` was used at
-     registration. Fixed by setting `agentEnvVars: STRICT_VERIFY=false` on
-     the `provisioning.cattle.io.cluster` object at creation time.
-  Both fixes are implemented in `Scripts/rgsctl`'s `register_cluster`
-  function (`rgsctl register <module> <cluster-name>`).
+     registration. Fix: set `agentEnvVars: STRICT_VERIFY=false` on the
+     `provisioning.cattle.io.cluster` object at creation time.
 - **Carbide Secured Registry hostname was wrong**: an earlier default
   (`rgcrprod.azurecr.us`, an Azure Container Registry hostname) came from
   web research done before real Carbide Portal access existed, and was
@@ -124,12 +143,15 @@ live in `terraform.tfvars`.
   for why: the latest chart at test time referenced image tags Carbide's
   mirror hadn't synced yet), with images sourced from Carbide via
   `global.imageRegistry`. Also required: installing `local-path-provisioner`
-  (RKE2 has no default StorageClass, unlike K3s) and re-staging
-  `registries.yaml` after any node reboot (Rancher's system-agent wipes it
-  on every plan reconcile). Confirmed reachable end-to-end over HTTPS
-  2026-08-05. `observability_instance_type` bumped to `m5.4xlarge` (16
-  vCPU/64GB, non-burstable) - a `t3.2xlarge` hit `Insufficient cpu` once the
-  full stack scheduled together.
+  (RKE2 has no default StorageClass, unlike K3s). Confirmed reachable
+  end-to-end over HTTPS 2026-08-05. Sizing: `m5.4xlarge` (16 vCPU/64GB,
+  non-burstable) confirmed as the real minimum via Rancher's node-template
+  config - a `t3.2xlarge` hit `Insufficient cpu` once the full stack
+  scheduled together. (At the time, this ran on a bare node we provisioned
+  ourselves, which needed out-of-band `registries.yaml` staging that
+  Rancher's system-agent kept wiping on every reboot/plan reconcile - that
+  whole problem is why `rancher-manager` now configures Carbide as
+  Rancher's `system-default-registry` instead, per the pivot above.)
 
 ## Still Unverified
 
@@ -137,13 +159,21 @@ live in `terraform.tfvars`.
   `rancher-stable/rancher` Helm chart. `rgs_carbide_rancher_image` /
   `rgs_carbide_rancher_chart` vars exist to override with Carbide-hosted
   images/chart once that path is confirmed from the Carbide Portal.
-- **EKS driver credential mechanism**: `eks-cluster/main.tf` creates an IAM
-  role, but Rancher's EKS Cloud Credential form may expect a static AWS
-  access key/secret instead. Confirm once you have Rancher UI access.
+- **`rancher-cloud-credential`'s IAM policy**: covers both the EC2 node
+  driver and EKS driver permission sets as a reasonable starting point, but
+  not verified against Rancher's official minimum-IAM-policy docs for
+  either - tighten once you've actually created a node/cluster through the
+  UI and can see what it complains is missing.
+- **`system-default-registry` automation** (`rancher-manager/user-data.sh`):
+  patches the Setting + creates a Private Registry credentials Secret right
+  after Rancher's install succeeds, but not yet confirmed live that a
+  subsequently-provisioned downstream node actually inherits working
+  Carbide auth from it. Deliberately non-fatal if it fails - see
+  `rancher-manager/README.md` for the manual UI fallback.
 - **RGS Security chart source**: still not confirmed - `security/` hosts a
   separate demo cluster (`user-apps`) for the Security product specifically,
-  which is a different install than Observability's. `rgsctl register`
-  gets that cluster to `Active`, but the product install itself is TBD.
+  which is a different install than Observability's. No install script
+  exists yet, unlike `observability/install-rgs-observability.sh`.
 
 ## Registry / Airgap
 

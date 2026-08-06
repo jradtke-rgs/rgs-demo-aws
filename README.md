@@ -24,19 +24,20 @@ decision log.
 ## Architecture
 
 ```
-shared-services/     VPC, subnets, security groups (deploy first, destroy last)
-rancher-manager/      single-node RKE2 + Rancher (mandatory)
-eks-cluster/          IAM plumbing for the Rancher EKS driver
-observability/        bare node for its own downstream RKE2 cluster
-security/             bare node for the "user-apps" downstream RKE2 cluster (Security demo)
+shared-services/            VPC, subnets, security groups (deploy first, destroy last)
+rancher-manager/             single-node RKE2 + Rancher (mandatory)
+rancher-cloud-credential/    IAM user+key for Rancher's EC2 node driver + EKS driver
+observability/               docs + product install script (no .tf - see below)
+security/                     docs only (no .tf - see below)
 ```
 
-All product modules depend on `shared-services`' tfstate via
-`terraform_remote_state`. `eks-cluster`, `observability`, and `security` only
-provision AWS-side infrastructure in v1 - the Rancher-side wiring (EKS driver
-setup, custom cluster import, product Helm installs) is a documented manual
-step per module (see each module's README.md), since it's new territory with
-no proven automation to build against yet.
+OpenTofu's job stops at "Rancher Manager is running." Everything downstream
+- RGS Observability's cluster, the `user-apps` cluster for the RGS Security
+demo, and EKS - is created **from Rancher itself**, using the Cloud
+Credential `rancher-cloud-credential` outputs. `observability/` and
+`security/` have no Terraform resources of their own anymore; they're docs
+(and, for Observability, the product Helm-install script) describing that
+Rancher-driven flow. See each module's README.md.
 
 ## Prerequisites
 
@@ -103,19 +104,25 @@ Steps** below for what's left once it finishes.
 
 ## Manual Steps
 
-After `rgsctl build`:
+After `rgsctl build` (shared-services + rancher-manager +
+rancher-cloud-credential), everything else happens **in Rancher's UI**:
 
-1. Follow `eks-cluster/README.md` to wire up an AWS Cloud Credential and
-   create the downstream EKS cluster via the Rancher EKS driver - still
-   manual, no reference-repo precedent to automate against yet.
-2. Register the observability/security clusters (automated, no UI clicking):
-   ```bash
-   Scripts/rgsctl register observability observability
-   Scripts/rgsctl register security user-apps
-   ```
-3. Once each cluster shows `Active` in Rancher, `helm install` the
-   corresponding RGS product chart - still manual, since the real Carbide
-   Portal chart source isn't confirmed yet (see `ProjectSpec.md`).
+1. **Cluster Management → Cloud Credentials → Create → Amazon**, using
+   `rancher-cloud-credential`'s `access_key_id`/`secret_access_key` outputs.
+2. **Cluster Management → Create → Custom** (EC2 node driver) for the
+   Observability and `user-apps` clusters, and **Create → Amazon EKS** for
+   the EKS cluster - all using that same Cloud Credential. See
+   `rancher-cloud-credential/README.md`, `observability/README.md`, and
+   `security/README.md`.
+3. Once each cluster shows `Active`: `observability/install-rgs-observability.sh`
+   installs RGS Observability (confirmed working end-to-end). RGS Security's
+   chart source is still unconfirmed (see `ProjectSpec.md`) - `helm install`
+   it by hand once you know the chart.
+
+DNS for Observability/`user-apps` is also manual now, since OpenTofu doesn't
+know their node IPs ahead of time - create a Route53 A record for
+`hostname_observability`/`hostname_userapps` (from `terraform.tfvars`)
+pointing at the node once it exists, if you want clean hostnames.
 
 ## Credentials
 
@@ -140,8 +147,8 @@ root `terraform.tfvars`. See `terraform.tfvars.example` for the full list.
   running `rgsctl destroy` in it first, its resources become real,
   untracked orphans in AWS.
 - Several details are flagged `TODO`/unverified in code and READMEs pending
-  real Carbide Portal access - see `rancher-manager/README.md` and
-  `eks-cluster/README.md`.
+  real Rancher UI/Carbide Portal access - see `rancher-manager/README.md` and
+  `rancher-cloud-credential/README.md`.
 
 **NOTE:** This is ONLY intended to run as a demo/lab. Trade-offs have been
 made to minimize cost which make this approach unacceptable for production

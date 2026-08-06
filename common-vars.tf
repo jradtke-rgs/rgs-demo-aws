@@ -85,46 +85,24 @@ variable "ssh_public_key" {
 }
 
 # Instance Configuration - Module Specific
+#
+# NOTE: observability/security no longer have their own instance_type/
+# root_volume_size vars - those downstream clusters are now created FROM
+# Rancher itself (its EC2 node driver), which has its own node-template
+# sizing config, not OpenTofu. For reference, m5.4xlarge (16 vCPU/64GB,
+# non-burstable) was confirmed live 2026-08-05 as the real minimum for RGS
+# Observability's "10-nonha" profile once the full stack schedules together
+# - see observability/README.md for the details (a t3.2xlarge hit
+# "Insufficient cpu" at ~95% allocated, and T-family is the wrong instance
+# class anyway for a sustained multi-service backend).
 variable "rancher_instance_type" {
   description = "EC2 instance type for Rancher Manager server"
   type        = string
   default     = "t3.large"
 }
 
-# NOTE: confirmed live 2026-08-05 - the "10-nonha" sizing profile needs more
-# than t3.2xlarge (8 vCPU) once the full stack actually schedules together
-# (hit "Insufficient cpu" at ~95% allocated, blocking Kafka/Elasticsearch).
-# Also: T-family (burstable) is the wrong class for this - it's a sustained
-# multi-service backend, not a bursty workload, and burst credits don't
-# affect the scheduler's request-based admission check anyway. m5.4xlarge
-# (16 vCPU/64GB, non-burstable) confirmed working for the full "10-nonha"
-# profile with headroom (~57% CPU allocated once everything is Running).
-variable "observability_instance_type" {
-  description = "EC2 instance type for RGS Observability downstream node (m5.4xlarge confirmed minimum for the \"10-nonha\" sizing profile - non-burstable, sustained multi-service workload)"
-  type        = string
-  default     = "m5.4xlarge"
-}
-
-variable "security_instance_type" {
-  description = "EC2 instance type for the user-apps downstream node hosting RGS Security"
-  type        = string
-  default     = "t3.large"
-}
-
 variable "rancher_root_volume_size" {
   description = "Root volume size in GB for Rancher Manager"
-  type        = number
-  default     = 100
-}
-
-variable "observability_root_volume_size" {
-  description = "Root volume size in GB for the Observability downstream node (minimum 300GB - Elasticsearch/Kafka/HBase/ClickHouse all need persistent storage)"
-  type        = number
-  default     = 300
-}
-
-variable "security_root_volume_size" {
-  description = "Root volume size in GB for the user-apps downstream node"
   type        = number
   default     = 100
 }
