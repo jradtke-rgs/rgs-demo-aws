@@ -252,6 +252,12 @@ variable "rgs_carbide_rancher_image" {
 }
 
 # RGS Observability Configuration
+#
+# NOTE: base URLs for Rancher/Observability are deliberately not variables
+# here - they'd just duplicate hostname_rancher/hostname_observability +
+# subdomain + root_domain, which rancher-manager's `rancher_url` output and
+# observability's `observability_url` output already derive from directly.
+# Removed 2026-08-06 after confirming they were unused by any resource.
 variable "rgs_observability_license" {
   description = "RGS Observability license key (required for observability module)"
   type        = string
@@ -259,20 +265,8 @@ variable "rgs_observability_license" {
   sensitive   = true
 }
 
-variable "rgs_observability_base_url" {
-  description = "Base URL for RGS Observability (e.g., https://observability.example.com)"
-  type        = string
-  default     = ""
-}
-
-variable "rgs_rancher_url" {
-  description = "Base URL for RGS Rancher Manager (e.g., https://rancher.example.com)"
-  type        = string
-  default     = ""
-}
-
 variable "rgs_observability_admin_password" {
-  description = "Admin password for RGS Observability (auto-generated if empty)"
+  description = "Admin password for RGS Observability - the chart requires this explicitly, there is no true auto-generate despite the name (confirmed 2026-08-05)"
   type        = string
   default     = ""
   sensitive   = true

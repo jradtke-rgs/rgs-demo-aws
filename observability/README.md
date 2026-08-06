@@ -37,14 +37,22 @@ Once the cluster shows `Active` in Rancher, run `install-rgs-observability.sh`
 on the node (over SSH, as root) - confirmed working end-to-end 2026-08-05:
 
 ```bash
-ssh -i ~/.ssh/rgs-demo-aws.pem ec2-user@$(cd observability && tofu output -raw public_ip) \
-  'sudo RGS_OBSERVABILITY_LICENSE="<from Carbide Portal>" \
-   RGS_OBSERVABILITY_ADMIN_PASSWORD="<generate one - see script header>" \
-   RGS_RANCHER_URL="https://rancher.<subdomain>.<root_domain>" \
-   RGS_OBSERVABILITY_BASE_URL="https://observability.<subdomain>.<root_domain>" \
-   RGS_OBSERVABILITY_HOSTNAME="observability.<subdomain>.<root_domain>" \
-   RGS_CARBIDE_REGISTRY="registry.ranchercarbide.dev" \
-   bash -s' < observability/install-rgs-observability.sh
+# rancher_url/observability_url/observability_hostname are derived outputs
+# (from hostname_rancher/hostname_observability + subdomain + root_domain) -
+# no need to retype the domain here.
+RANCHER_URL=$(cd rancher-manager && tofu output -raw rancher_url)
+OBSERVABILITY_BASE_URL=$(cd observability && tofu output -raw observability_url)
+OBSERVABILITY_HOSTNAME=$(cd observability && tofu output -raw observability_hostname)
+OBSERVABILITY_IP=$(cd observability && tofu output -raw public_ip)
+
+ssh -i ~/.ssh/rgs-demo-aws.pem "ec2-user@${OBSERVABILITY_IP}" \
+  "sudo RGS_OBSERVABILITY_LICENSE='<from Carbide Portal>' \
+   RGS_OBSERVABILITY_ADMIN_PASSWORD='<generate one - see script header>' \
+   RGS_RANCHER_URL='${RANCHER_URL}' \
+   RGS_OBSERVABILITY_BASE_URL='${OBSERVABILITY_BASE_URL}' \
+   RGS_OBSERVABILITY_HOSTNAME='${OBSERVABILITY_HOSTNAME}' \
+   RGS_CARBIDE_REGISTRY='registry.ranchercarbide.dev' \
+   bash -s" < observability/install-rgs-observability.sh
 ```
 
 This is a real, multi-component product (Elasticsearch, Kafka, Zookeeper,

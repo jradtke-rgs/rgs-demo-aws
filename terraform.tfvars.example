@@ -128,9 +128,10 @@ rgs_carbide_rancher_chart = ""
 # -----------------------------------------------------------------------------
 # RGS Observability Configuration
 # -----------------------------------------------------------------------------
+# Base URLs aren't set here - rancher-manager's `rancher_url` output and
+# observability's `observability_url` output already derive them from
+# hostname_rancher/hostname_observability + subdomain + root_domain above.
 rgs_observability_license        = "YOUR_RGS_OBSERVABILITY_LICENSE_KEY" ##UPDATE##
-rgs_observability_base_url       = "https://observability.rgs-demo-aws.kubernerdes.com" ##UPDATE##
-rgs_rancher_url                  = "https://rancher.rgs-demo-aws.kubernerdes.com" ##UPDATE##
 rgs_observability_admin_password = "" ##UPDATE## # chart requires an explicit value - "leave empty to auto-generate" does not actually work, confirmed 2026-08-05
 
 # -----------------------------------------------------------------------------
