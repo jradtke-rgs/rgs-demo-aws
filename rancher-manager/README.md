@@ -14,7 +14,7 @@ tofu apply -var-file=../terraform.tfvars
 
 `rgs_carbide_username`/`rgs_carbide_password` (from `terraform.tfvars`) are
 written into `/etc/rancher/rke2/registries.yaml` on the node so containerd can
-authenticate to the Carbide Secured Registry (`rgcrprod.azurecr.us`) directly.
+authenticate to the Carbide Secured Registry (`registry.ranchercarbide.dev`) directly.
 No Hauler/Harbor mirroring for v1 - this demo is fully internet-connected.
 
 ## Confirmed live (2026-08-05)

@@ -54,8 +54,8 @@ ssh_public_key = ""
 rancher_instance_type      = "t3.large"
 rancher_root_volume_size   = 100
 
-observability_instance_type    = "t3.large"
-observability_root_volume_size = 100
+observability_instance_type    = "m5.4xlarge"  # confirmed minimum for the "10-nonha" sizing profile - non-burstable
+observability_root_volume_size = 300           # Elasticsearch/Kafka/HBase/ClickHouse need persistent storage
 
 security_instance_type    = "t3.large"
 security_root_volume_size = 100
@@ -98,7 +98,7 @@ letsencrypt_environment = "production"  # Use "staging" for testing, "production
 # Credentials issued via the Carbide Portal for the Carbide Secured Registry.
 # This demo is fully internet-connected, so nodes authenticate to Carbide
 # directly (no Hauler/Harbor mirroring for v1).
-rgs_carbide_registry = "rgcrprod.azurecr.us"
+rgs_carbide_registry = "registry.ranchercarbide.dev"
 rgs_carbide_username = "YOUR-CARBIDE-PORTAL-USERNAME"
 rgs_carbide_password = "YOUR-CARBIDE-PORTAL-PASSWORD-OR-TOKEN"
 

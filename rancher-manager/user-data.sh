@@ -37,7 +37,7 @@ PRIVATE_IP=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4)
 #######################################
 # Configure Carbide Secured Registry auth for containerd
 #######################################
-# The Carbide Secured Registry (rgcrprod.azurecr.us) is the acquisition point
+# The Carbide Secured Registry (registry.ranchercarbide.dev) is the acquisition point
 # for RGS-hardened images. This demo is fully internet-connected, so RKE2's
 # embedded containerd authenticates to it directly via registries.yaml - no
 # Hauler/Harbor mirroring step needed.

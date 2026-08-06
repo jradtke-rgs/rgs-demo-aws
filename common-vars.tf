@@ -91,10 +91,18 @@ variable "rancher_instance_type" {
   default     = "t3.large"
 }
 
+# NOTE: confirmed live 2026-08-05 - the "10-nonha" sizing profile needs more
+# than t3.2xlarge (8 vCPU) once the full stack actually schedules together
+# (hit "Insufficient cpu" at ~95% allocated, blocking Kafka/Elasticsearch).
+# Also: T-family (burstable) is the wrong class for this - it's a sustained
+# multi-service backend, not a bursty workload, and burst credits don't
+# affect the scheduler's request-based admission check anyway. m5.4xlarge
+# (16 vCPU/64GB, non-burstable) confirmed working for the full "10-nonha"
+# profile with headroom (~57% CPU allocated once everything is Running).
 variable "observability_instance_type" {
-  description = "EC2 instance type for RGS Observability downstream node"
+  description = "EC2 instance type for RGS Observability downstream node (m5.4xlarge confirmed minimum for the \"10-nonha\" sizing profile - non-burstable, sustained multi-service workload)"
   type        = string
-  default     = "t3.large"
+  default     = "m5.4xlarge"
 }
 
 variable "security_instance_type" {
@@ -110,9 +118,9 @@ variable "rancher_root_volume_size" {
 }
 
 variable "observability_root_volume_size" {
-  description = "Root volume size in GB for the Observability downstream node"
+  description = "Root volume size in GB for the Observability downstream node (minimum 300GB - Elasticsearch/Kafka/HBase/ClickHouse all need persistent storage)"
   type        = number
-  default     = 100
+  default     = 300
 }
 
 variable "security_root_volume_size" {
@@ -173,14 +181,19 @@ variable "hostname_userapps" {
 }
 
 # RGS / Carbide Portal Registration
-# The Carbide Secured Registry (rgcrprod.azurecr.us) is the acquisition point for
-# RGS-hardened images. It is documented as NOT intended to be the primary registry
-# clusters pull from in production, but for this connected (non-airgapped) demo,
-# nodes authenticate to it directly - no Hauler/Harbor mirroring for v1.
+# The Carbide Secured Registry (registry.ranchercarbide.dev - itself Harbor-
+# backed, confirmed via its /v2/ auth challenge: service="harbor-registry")
+# is the acquisition point for RGS-hardened images. For this connected
+# (non-airgapped) demo, nodes authenticate to it directly - no additional
+# Hauler/Harbor mirroring of our own for v1.
+# NOTE: an earlier default here (registry.ranchercarbide.dev, an Azure Container
+# Registry hostname) was wrong - found via web research before real Carbide
+# Portal access was available. Corrected 2026-08-05 after confirming the
+# real hostname via `docker login` against an active Carbide account.
 variable "rgs_carbide_registry" {
   description = "Carbide Secured Registry hostname"
   type        = string
-  default     = "rgcrprod.azurecr.us"
+  default     = "registry.ranchercarbide.dev"
 }
 
 variable "rgs_carbide_username" {
@@ -233,7 +246,7 @@ variable "rgs_carbide_rancher_chart" {
 }
 
 variable "rgs_carbide_rancher_image" {
-  description = "Carbide registry image path for Rancher (e.g. rgcrprod.azurecr.us/rancher/rancher), if/when confirmed. Leave empty to use the chart's default (non-hardened) image."
+  description = "Carbide registry image path for Rancher (e.g. registry.ranchercarbide.dev/rancher/rancher), if/when confirmed. Leave empty to use the chart's default (non-hardened) image."
   type        = string
   default     = ""
 }

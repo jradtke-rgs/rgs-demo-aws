@@ -711,6 +711,8 @@ build() {
         cd - > /dev/null || exit 1
     done
 
+    show_urls
+
     print_header "Deployment Complete!"
     print_msg "${GREEN}" "AWS-side infrastructure has been deployed."
     print_msg "${YELLOW}" "Next steps:"
@@ -784,6 +786,47 @@ show_output() {
     done
 
     print_header "Output Display Complete!"
+}
+
+#######################################
+# URLs: print each product's app URL in one place, rather than making you
+# dig through the full `tofu output` dump per module.
+#######################################
+show_urls() {
+    print_header "Product URLs"
+
+    check_tofu
+    goto_repo_root
+
+    local rancher_url observability_url userapps_url
+
+    if [ -d "rancher-manager" ]; then
+        rancher_url=$(cd rancher-manager && tofu output -raw rancher_url 2>/dev/null)
+    fi
+    if [ -d "observability" ]; then
+        observability_url=$(cd observability && tofu output -raw observability_url 2>/dev/null)
+    fi
+    if [ -d "security" ]; then
+        userapps_url=$(cd security && tofu output -raw userapps_url 2>/dev/null)
+    fi
+
+    if [ -n "$rancher_url" ]; then
+        print_msg "${GREEN}" "Rancher:       ${rancher_url}"
+    else
+        print_msg "${YELLOW}" "Rancher:       (not deployed yet)"
+    fi
+
+    if [ -n "$observability_url" ]; then
+        print_msg "${GREEN}" "Observability: ${observability_url}  (rgsctl register + Helm install still required - see observability/README.md)"
+    else
+        print_msg "${YELLOW}" "Observability: (not deployed yet)"
+    fi
+
+    if [ -n "$userapps_url" ]; then
+        print_msg "${GREEN}" "Security:      ${userapps_url}  (rgsctl register + Helm install still required - see security/README.md)"
+    else
+        print_msg "${YELLOW}" "Security:      (not deployed yet)"
+    fi
 }
 
 #######################################
@@ -874,6 +917,9 @@ OPTIONS:
 
     output      Display OpenTofu outputs from all deployed modules
 
+    urls        Print each product's app URL in one place (Rancher,
+                Observability, Security) - also shown at the end of build
+
     getkube     Retrieve kubeconfig from the rancher-manager node
                 (observability/security require manual Rancher import first)
 
@@ -918,6 +964,7 @@ PREREQUISITES:
 EXAMPLES:
     $(basename "$0") build
     $(basename "$0") output
+    $(basename "$0") urls
     $(basename "$0") getkube
     $(basename "$0") register observability observability
     $(basename "$0") register security user-apps
@@ -956,6 +1003,9 @@ main() {
             ;;
         orphans)
             orphans "$2"
+            ;;
+        urls)
+            show_urls
             ;;
         help|--help|-h)
             show_help

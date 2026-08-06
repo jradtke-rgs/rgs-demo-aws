@@ -62,7 +62,7 @@ This repo will resemble https://github.com/cloudxabide/suse-demo-aws
   license values live in a gitignored root `terraform.tfvars`, exactly like
   `suse-demo-aws`.
 * **Registry access**: no Hauler/Harbor for v1. Researched both - the Carbide
-  Secured Registry (`rgcrprod.azurecr.us`) explicitly documents Hauler as
+  Secured Registry (`registry.ranchercarbide.dev`) explicitly documents Hauler as
   "recommended" (not required) tooling built for airgapped asset transfer.
   Since this demo is fully internet-connected, nodes authenticate to Carbide
   directly via RKE2's `registries.yaml`. Harbor (mirroring your own registry)
@@ -110,3 +110,17 @@ This repo will resemble https://github.com/cloudxabide/suse-demo-aws
   exact hostname per rolling 7 days) that repeated `rancher-manager` rebuilds
   can hit quickly during iteration - switch `letsencrypt_environment` to
   `staging` while actively rebuilding.
+* **RGS Observability is now fully working end-to-end**, confirmed live over
+  HTTPS: `observability/install-rgs-observability.sh` installs the public
+  `suse-observability` chart (pinned to `2.10.2` - the then-latest `2.10.3`
+  referenced image tags Carbide's registry mirror hadn't synced yet) with
+  images sourced from Carbide (`registry.ranchercarbide.dev` - the earlier
+  `rgcrprod.azurecr.us` default was simply wrong, found via web research
+  before real Portal access existed). Also required: `local-path-provisioner`
+  (RKE2 has no default StorageClass) and re-staging `registries.yaml` after
+  reboots (Rancher's agent wipes it on every plan reconcile). Bumped
+  `observability_instance_type` to `m5.4xlarge` (16 vCPU/64GB, non-burstable)
+  - `t3.2xlarge` hit a real CPU scheduling ceiling once the full "10-nonha"
+  stack ran together. Full writeup: `observability/README.md` and `CLAUDE.md`.
+* RGS Security's chart source is still unconfirmed - same category of
+  problem, not yet worked through.

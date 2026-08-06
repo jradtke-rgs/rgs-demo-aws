@@ -107,6 +107,29 @@ live in `terraform.tfvars`.
      the `provisioning.cattle.io.cluster` object at creation time.
   Both fixes are implemented in `Scripts/rgsctl`'s `register_cluster`
   function (`rgsctl register <module> <cluster-name>`).
+- **Carbide Secured Registry hostname was wrong**: an earlier default
+  (`rgcrprod.azurecr.us`, an Azure Container Registry hostname) came from
+  web research done before real Carbide Portal access existed, and was
+  simply incorrect. The real hostname is `registry.ranchercarbide.dev`
+  (itself Harbor-backed - confirmed via its `/v2/` auth challenge:
+  `service="harbor-registry"`). Corrected in `rgs_carbide_registry`'s
+  default. Harbor returns `401`/`403` ambiguously for both "wrong
+  credentials"/"forbidden" and "this host/repo/tag doesn't exist" - don't
+  conclude a credentials or entitlement problem without first checking the
+  registry's own `/v2/_catalog` and `/v2/<repo>/tags/list` (no special
+  permission needed beyond the same pull creds).
+- **RGS Observability install, end-to-end**: `observability/install-rgs-observability.sh`
+  installs the public `charts.rancher.com/server-charts/prime/suse-observability`
+  chart (**pinned to `2.10.2`, not latest** - see the script's own comments
+  for why: the latest chart at test time referenced image tags Carbide's
+  mirror hadn't synced yet), with images sourced from Carbide via
+  `global.imageRegistry`. Also required: installing `local-path-provisioner`
+  (RKE2 has no default StorageClass, unlike K3s) and re-staging
+  `registries.yaml` after any node reboot (Rancher's system-agent wipes it
+  on every plan reconcile). Confirmed reachable end-to-end over HTTPS
+  2026-08-05. `observability_instance_type` bumped to `m5.4xlarge` (16
+  vCPU/64GB, non-burstable) - a `t3.2xlarge` hit `Insufficient cpu` once the
+  full stack scheduled together.
 
 ## Still Unverified
 
@@ -117,9 +140,10 @@ live in `terraform.tfvars`.
 - **EKS driver credential mechanism**: `eks-cluster/main.tf` creates an IAM
   role, but Rancher's EKS Cloud Credential form may expect a static AWS
   access key/secret instead. Confirm once you have Rancher UI access.
-- **RGS Observability/Security chart source**: not yet confirmed from the
-  Carbide Portal - `rgsctl register` gets the cluster to `Active`, but the
-  actual product Helm install is still a manual step pending this.
+- **RGS Security chart source**: still not confirmed - `security/` hosts a
+  separate demo cluster (`user-apps`) for the Security product specifically,
+  which is a different install than Observability's. `rgsctl register`
+  gets that cluster to `Active`, but the product install itself is TBD.
 
 ## Registry / Airgap
 
@@ -127,4 +151,4 @@ Hauler and Harbor were evaluated and deliberately excluded from v1: this demo
 runs fully internet-connected in AWS, and Hauler is purpose-built for
 airgapped asset transfer (per Carbide's own docs, it's "recommended," not
 required, for connected environments). Nodes authenticate directly to the
-Carbide Secured Registry (`rgcrprod.azurecr.us`) via `registries.yaml`.
+Carbide Secured Registry (`registry.ranchercarbide.dev`) via `registries.yaml`.
